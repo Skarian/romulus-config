@@ -4,7 +4,9 @@
 
 Option 1: Use the provided config file in the Romulus app via this URL:
 
-- `https://raw.githubusercontent.com/Skarian/romulus-config/main/source.json`
+```text
+https://raw.githubusercontent.com/Skarian/romulus-config/main/source.json
+```
 
 Option 2: Create your own config from scratch and optionally use the simulator
 
