@@ -1,0 +1,30 @@
+{
+  "name": "romulus-config",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --config vite.config.ts",
+    "check": "tsc --noEmit",
+    "build": "npm run check && vite build --config vite.config.ts",
+    "test": "tsx --test \"src/**/*.test.ts\""
+  },
+  "dependencies": {
+    "@zip.js/zip.js": "^2.8.23",
+    "ajv": "^8.17.1",
+    "better-sqlite3": "^12.8.0",
+    "minimatch": "^10.2.4",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0",
+    "react-hot-toast": "^2.6.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/node": "^24.6.0",
+    "@types/react": "^19.2.2",
+    "@types/react-dom": "^19.2.2",
+    "@vitejs/plugin-react": "^5.1.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.0"
+  }
+}
