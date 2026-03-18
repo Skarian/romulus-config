@@ -3,6 +3,7 @@ import path from "node:path";
 
 import Database from "better-sqlite3";
 
+import { normalizeArchiveSampleExtensions } from "../archiveSamplePolicy";
 import type { PreviewFixture, PreviewFixtureSample } from "../types";
 
 type CachePayload = {
@@ -98,8 +99,14 @@ type PreviewFixtureRecord = {
   updated_at: string;
 };
 
-type SelectedFileStateRecord = {
+type ArchiveSampleExtensionsRecord = {
   hydration_key: string;
+  file_extensions_json: string;
+  updated_at: string;
+};
+
+type SelectedFileStateRecord = {
+  state_key: string;
   selected_row_ids_json: string;
   updated_at: string;
 };
@@ -188,41 +195,101 @@ export class SimulatorCacheDb {
     return rows.map(mapPreviewFixture);
   }
 
-  getSelectedRowIds(hydrationKey: string): string[] {
+  getArchiveSampleExtensions(hydrationKey: string) {
     const row = this.database
       .prepare(`
         SELECT *
-        FROM selected_file_state
+        FROM archive_sample_extension_policies
         WHERE hydration_key = ?
       `)
-      .get(hydrationKey) as SelectedFileStateRecord | undefined;
+      .get(hydrationKey) as ArchiveSampleExtensionsRecord | undefined;
 
     if (!row) {
       return [];
     }
 
-    return JSON.parse(row.selected_row_ids_json) as string[];
+    return normalizeArchiveSampleExtensions(
+      JSON.parse(row.file_extensions_json) as string[],
+    );
   }
 
-  setSelectedRowIds(hydrationKey: string, selectedRowIds: string[]) {
+  setArchiveSampleExtensions(hydrationKey: string, fileExtensions: string[]) {
+    const normalizedFileExtensions = normalizeArchiveSampleExtensions(fileExtensions);
     const updatedAt = new Date().toISOString();
     this.database
       .prepare(`
-        INSERT INTO selected_file_state (
+        INSERT INTO archive_sample_extension_policies (
           hydration_key,
-          selected_row_ids_json,
+          file_extensions_json,
           updated_at
         ) VALUES (
           @hydration_key,
-          @selected_row_ids_json,
+          @file_extensions_json,
           @updated_at
         )
         ON CONFLICT(hydration_key) DO UPDATE SET
-          selected_row_ids_json = excluded.selected_row_ids_json,
+          file_extensions_json = excluded.file_extensions_json,
           updated_at = excluded.updated_at
       `)
       .run({
         hydration_key: hydrationKey,
+        file_extensions_json: JSON.stringify(normalizedFileExtensions),
+        updated_at: updatedAt,
+      });
+
+    return {
+      fileExtensions: normalizedFileExtensions,
+      updatedAt,
+    };
+  }
+
+  getSelectedRowIds(
+    stateKey: string,
+    legacyKeys: {
+      previousEntryId?: string;
+      hydrationKey?: string;
+    } = {},
+  ): string[] {
+    const scopedSelectedRowIds = this.readScopedSelectedRowIds(stateKey);
+    const persisted =
+      scopedSelectedRowIds ??
+      (legacyKeys.previousEntryId
+        ? this.readLegacyEntrySelectedRowIds(legacyKeys.previousEntryId)
+        : null) ??
+      (legacyKeys.hydrationKey
+        ? this.readLegacyHydrationSelectedRowIds(legacyKeys.hydrationKey)
+        : null);
+
+    if (!persisted) {
+      return [];
+    }
+
+    if (scopedSelectedRowIds === null) {
+      this.setSelectedRowIds(stateKey, persisted);
+    }
+
+    return persisted;
+  }
+
+  setSelectedRowIds(stateKey: string, selectedRowIds: string[]) {
+    const updatedAt = new Date().toISOString();
+    this.database
+      .prepare(`
+        INSERT INTO selected_file_state_by_scope (
+          state_key,
+          selected_row_ids_json,
+          updated_at
+        ) VALUES (
+          @state_key,
+          @selected_row_ids_json,
+          @updated_at
+        )
+        ON CONFLICT(state_key) DO UPDATE SET
+          selected_row_ids_json = excluded.selected_row_ids_json,
+          updated_at = excluded.updated_at
+      `)
+      .run({
+        state_key: stateKey,
         selected_row_ids_json: JSON.stringify(selectedRowIds),
         updated_at: updatedAt,
       });
@@ -352,12 +419,72 @@ export class SimulatorCacheDb {
         updated_at TEXT NOT NULL
       );
 
+      CREATE TABLE IF NOT EXISTS archive_sample_extension_policies (
+        hydration_key TEXT PRIMARY KEY,
+        file_extensions_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
       CREATE TABLE IF NOT EXISTS selected_file_state (
         hydration_key TEXT PRIMARY KEY,
         selected_row_ids_json TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS selected_file_state_by_entry (
+        entry_id TEXT PRIMARY KEY,
+        selected_row_ids_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS selected_file_state_by_scope (
+        state_key TEXT PRIMARY KEY,
+        selected_row_ids_json TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
+  }
+
+  private readScopedSelectedRowIds(stateKey: string) {
+    const row = this.database
+      .prepare(`
+        SELECT *
+        FROM selected_file_state_by_scope
+        WHERE state_key = ?
+      `)
+      .get(stateKey) as SelectedFileStateRecord | undefined;
+
+    return row ? (JSON.parse(row.selected_row_ids_json) as string[]) : null;
+  }
+
+  private readLegacyEntrySelectedRowIds(entryId: string) {
+    const row = this.database
+      .prepare(`
+        SELECT
+          entry_id AS state_key,
+          selected_row_ids_json,
+          updated_at
+        FROM selected_file_state_by_entry
+        WHERE entry_id = ?
+      `)
+      .get(entryId) as SelectedFileStateRecord | undefined;
+
+    return row ? (JSON.parse(row.selected_row_ids_json) as string[]) : null;
+  }
+
+  private readLegacyHydrationSelectedRowIds(hydrationKey: string) {
+    const row = this.database
+      .prepare(`
+        SELECT
+          hydration_key AS state_key,
+          selected_row_ids_json,
+          updated_at
+        FROM selected_file_state
+        WHERE hydration_key = ?
+      `)
+      .get(hydrationKey) as SelectedFileStateRecord | undefined;
+
+    return row ? (JSON.parse(row.selected_row_ids_json) as string[]) : null;
   }
 }
 
@@ -375,12 +502,20 @@ function mapSourceCacheRow(record: SourceCacheRowRecord): SourceCacheRow {
 }
 
 function mapPreviewFixture(record: PreviewFixtureRecord): PreviewFixture {
+  const samples = (JSON.parse(record.samples_json) as PreviewFixtureSample[]).filter(
+    (sample) =>
+      !(
+        sample.id === "default" &&
+        sample.originalName === `[${record.archive_base_name}]`
+      ),
+  );
+
   return {
     fixtureKey: record.fixture_key,
     sourceFileId: record.source_file_id,
     archiveDisplayName: record.archive_display_name,
     archiveBaseName: record.archive_base_name,
-    samples: JSON.parse(record.samples_json) as PreviewFixtureSample[],
+    samples,
     updatedAt: record.updated_at,
   };
 }
@@ -432,7 +567,7 @@ export function createPreparingArchiveCacheRow(
 export function createReadyArchiveCacheRow(
   cacheKey: string,
   exactMatch: CachedProviderFileRecord,
-  resumeMarker: CachedProviderResumeMarker,
+  resumeMarker: CachedProviderResumeMarker | null,
   outerZip: CachedArchiveContainer,
   entries: CachedArchiveEntryDescriptor[],
 ): SourceCacheRow {

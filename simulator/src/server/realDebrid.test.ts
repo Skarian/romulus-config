@@ -141,6 +141,59 @@ test("enumerateProviderFiles retries 429 responses with a fallback cooldown", as
   );
 });
 
+test("enumerateProviderFiles keeps provider file ids distinct across torrent sources", async () => {
+  let nowMs = 0;
+  const requests: Array<{ url: string; method: string; atMs: number }> = [];
+  const fetchImpl = queuedFetch(requests, [
+    jsonResponse([{ host: "rd" }]),
+    jsonResponse({ id: "torrent-1" }),
+    jsonResponse({
+      ...torrentInfo({
+        selected: 0,
+        links: [],
+      }),
+      id: "torrent-1",
+    }),
+    jsonResponse([{ host: "rd" }]),
+    jsonResponse({ id: "torrent-2" }),
+    jsonResponse({
+      ...torrentInfo({
+        selected: 0,
+        links: [],
+      }),
+      id: "torrent-2",
+    }),
+    new Response(null, { status: 204 }),
+    new Response(null, { status: 204 }),
+  ], () => nowMs);
+
+  const client = new RealDebridClient("token", {
+    fetchImpl,
+    now: () => nowMs,
+    sleep: async (durationMs) => {
+      nowMs += durationMs;
+    },
+  });
+
+  const files = await client.enumerateProviderFiles([
+    {
+      magnetUri: "magnet:?xt=urn:btih:AAA",
+      partLabel: null,
+    },
+    {
+      magnetUri: "magnet:?xt=urn:btih:BBB",
+      partLabel: null,
+    },
+  ]);
+
+  assert.equal(files.length, 2);
+  assert.notEqual(files[0]?.providerFileId, files[1]?.providerFileId);
+  assert.deepEqual(
+    files.map((file) => file.path),
+    ["/ROMs/Nintendo.zip", "/ROMs/Nintendo.zip"],
+  );
+});
+
 test("cooldownBetweenSources waits two seconds and logs the source boundary cooldown", async () => {
   let nowMs = 0;
   const sleeps: number[] = [];
@@ -160,6 +213,31 @@ test("cooldownBetweenSources waits two seconds and logs the source boundary cool
 
   assert.deepEqual(sleeps, [REAL_DEBRID_BETWEEN_SOURCE_DELAY_MS]);
   assert.match(logs[0] ?? "", /before the next source/i);
+});
+
+test("releaseAcquisition deletes the prepared provider torrent", async () => {
+  const requests: Array<{ url: string; method: string; atMs: number }> = [];
+  const fetchImpl = queuedFetch(requests, [
+    new Response(null, { status: 204 }),
+  ], () => 0);
+
+  const client = new RealDebridClient("token", {
+    fetchImpl,
+  });
+
+  await client.releaseAcquisition({
+    torrentId: "torrent-42",
+    sourceMagnetUri: "magnet:?xt=urn:btih:AAA",
+    selectedProviderFileIds: ["7"],
+  });
+
+  assert.deepEqual(requests, [
+    {
+      url: "https://api.real-debrid.com/rest/1.0/torrents/delete/torrent-42",
+      method: "DELETE",
+      atMs: 0,
+    },
+  ]);
 });
 
 function queuedFetch(

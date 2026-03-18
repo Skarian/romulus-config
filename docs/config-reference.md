@@ -47,7 +47,7 @@ Optional per entry:
 Human-readable source name shown in the app
 
 ```json
-"displayName": "Nintendo Gamecube"
+"displayName": "Nintendo GameCube"
 ```
 
 ## `subfolder`

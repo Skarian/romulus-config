@@ -53,6 +53,7 @@ export type NormalizedScope = {
 export type PreviewEntry = {
   id: string;
   hydrationKey: string;
+  selectionStateKey: string;
   displayName: string;
   subfolder: string;
   scope: NormalizedScope;
@@ -147,7 +148,10 @@ export type SourceFilesState = {
   progressPercent: number | null;
   errorMessage: string | null;
   outerArchiveName: string | null;
+  archiveSampleExtensions: string[];
   previewFixtures: PreviewFixture[];
+  analysisFiles?: SourceFileRow[];
+  analysisOriginalNames?: string[];
   selectedRowIds?: string[];
   files: SourceFileRow[];
 };

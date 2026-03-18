@@ -16,6 +16,7 @@ const ZIP_SUFFIX = ".zip";
 export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
   return document.entries.map((entry, index) => {
     const scope = normalizeScope(entry.scope) ?? defaultScope();
+    const hydrationKey = stableHydrationKey(entry, scope.normalizedPath);
     const ignoreGlobs = (entry.ignore?.glob ?? [])
       .map((glob) => glob.trim())
       .filter((glob) => glob.length > 0);
@@ -29,7 +30,8 @@ export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
 
     return {
       id: stableEntryId(index, entry, scope.normalizedPath),
-      hydrationKey: stableHydrationKey(entry, scope.normalizedPath),
+      hydrationKey,
+      selectionStateKey: stableSelectionStateKey(hydrationKey, scope),
       displayName: entry.displayName,
       subfolder: entry.subfolder.trim(),
       scope,
@@ -168,6 +170,20 @@ function stableHydrationKey(
     mode === "archive"
       ? `${mode}|${torrentUrls}|${normalizedPath}`
       : `${mode}|${torrentUrls}`;
+
+  return createHash("sha256").update(seed).digest("hex");
+}
+
+function stableSelectionStateKey(
+  hydrationKey: string,
+  scope: PreviewEntry["scope"],
+): string {
+  const seed = [
+    hydrationKey,
+    scope.normalizedPath,
+    String(scope.includeNestedFiles),
+    scope.isArchiveSelection ? "archive" : "standard",
+  ].join("|");
 
   return createHash("sha256").update(seed).digest("hex");
 }

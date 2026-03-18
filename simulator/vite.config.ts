@@ -77,9 +77,10 @@ function simulatorStatePlugin(): Plugin {
             ? {}
             : (JSON.parse(rawBody) as { entryIds?: string[]; forceRefresh?: boolean });
         try {
-          void backend.runHydration(parsedBody.entryIds, {
+          const hydrationRun = backend.runHydration(parsedBody.entryIds, {
             forceRefresh: parsedBody.forceRefresh ?? false,
           });
+          void hydrationRun.catch(() => {});
           response.statusCode = 202;
           response.setHeader("Content-Type", "application/json");
           response.end(JSON.stringify({ accepted: true }));
@@ -152,6 +153,50 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
+      server.middlewares.use("/__simulator/archive-sample-extensions", async (request, response) => {
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end("Method not allowed");
+          return;
+        }
+
+        const rawBody = await readRequestBody(request);
+        const parsedBody = JSON.parse(rawBody) as {
+          entryId?: string;
+          fileExtensions?: string[];
+        };
+        if (
+          !parsedBody.entryId ||
+          !Array.isArray(parsedBody.fileExtensions) ||
+          parsedBody.fileExtensions.some((value) => typeof value !== "string")
+        ) {
+          response.statusCode = 400;
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify({ error: "Invalid archive sample extensions payload" }));
+          return;
+        }
+
+        try {
+          const policy = backend.setArchiveSampleExtensions(
+            parsedBody.entryId,
+            parsedBody.fileExtensions,
+          );
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify(policy));
+        } catch (error) {
+          response.statusCode = 400;
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Archive sample extensions could not be saved",
+            }),
+          );
+        }
+      });
       server.middlewares.use("/__simulator/selected-files", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
@@ -192,14 +237,87 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
+      server.middlewares.use("/__simulator/source-entry-policy", async (request, response) => {
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end("Method not allowed");
+          return;
+        }
+
+        try {
+          const rawBody = await readRequestBody(request);
+          const parsedBody = JSON.parse(rawBody) as {
+            entryId?: string;
+            selectionStateKey?: string;
+            displayName?: string;
+            subfolder?: string;
+            renamePolicy?: {
+              mode?: "none" | "all" | "phrases";
+              phrases?: string[];
+            };
+            ignoreGlobs?: string[];
+            confirmReplaceCustomRename?: unknown;
+          };
+
+          if (
+            !parsedBody.entryId ||
+            !parsedBody.selectionStateKey ||
+            !parsedBody.displayName ||
+            !parsedBody.subfolder ||
+            (!parsedBody.renamePolicy && !Array.isArray(parsedBody.ignoreGlobs)) ||
+            (parsedBody.renamePolicy &&
+              (!parsedBody.renamePolicy.mode ||
+                !Array.isArray(parsedBody.renamePolicy.phrases)))
+          ) {
+            response.statusCode = 400;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({ error: "Invalid source entry policy payload" }));
+            return;
+          }
+
+          const result = backend.updateSourceEntryPolicy({
+            entryId: parsedBody.entryId,
+            selectionStateKey: parsedBody.selectionStateKey,
+            displayName: parsedBody.displayName,
+            subfolder: parsedBody.subfolder,
+            renamePolicy: parsedBody.renamePolicy
+              ? {
+                  mode: parsedBody.renamePolicy.mode,
+                  phrases: parsedBody.renamePolicy.phrases,
+                }
+              : undefined,
+            ignoreGlobs: Array.isArray(parsedBody.ignoreGlobs)
+              ? parsedBody.ignoreGlobs
+              : undefined,
+            confirmReplaceCustomRename:
+              typeof parsedBody.confirmReplaceCustomRename === "undefined"
+                ? false
+                : parsedBody.confirmReplaceCustomRename,
+          });
+          response.statusCode = result.status === "ok" ? 200 : 409;
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify(result));
+        } catch (error) {
+          response.statusCode = 400;
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "Source entry policies could not be saved",
+            }),
+          );
+        }
+      });
       server.middlewares.use("/__simulator/events", (_request, response) => {
         response.setHeader("Content-Type", "text/event-stream");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("Connection", "keep-alive");
         response.write("event: state\n");
         response.write("data: {}\n\n");
-        const unsubscribe = backend.subscribe(() => {
-          response.write("event: state\n");
+        const unsubscribe = backend.subscribe((event) => {
+          response.write(`event: ${event.type}\n`);
           response.write("data: {}\n\n");
         });
         response.on("close", () => {

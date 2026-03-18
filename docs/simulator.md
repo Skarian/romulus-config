@@ -63,13 +63,38 @@ npm --prefix simulator run dev
 3. Check that the config is accepted
 4. Click `Update Database` when you need to pull or refresh file lists from Real-Debrid for each magnet
 5. Open a source and compare the Files list with the Download Folder Preview
-6. Keep adjusting the config until the preview matches what you want
+6. Use `Rename Policy`, `File Ignore Policy`, and `Statistics` below the workbench when you want the simulator to help shape the selected source entry
+7. Keep adjusting the config until the preview matches what you want
+
+`Rename Policy` writes managed rename rules back to the selected source entry in `source.json`
+
+`File Ignore Policy` writes the selected entry’s `ignore.glob` list back to `source.json`
+
+The `Files` list and `Download Folder Preview` react to your current unsaved rename and ignore draft so you can inspect the effect before writing anything back to `source.json`
+
+If a source has `unarchive` enabled and no saved unarchived file pattern yet, Download Folder Preview prompts for a comma-separated extension list like `.cue, .bin`
+
+That pattern is simulator-local and applies to every archive preview in the source until you edit it again
+
+Use the preview tree `+` action when one archive needs extra one-off example files beyond the shared source pattern
+
+If two selected outputs would land on the same final path, the preview numbers them as `(1)`, `(2)`, and so on so you can spot the collision without leaving the tree
+
+Unsaved ignore drafts are preview-only. They do not clear the saved selected-file set for hidden rows unless you actually apply the ignore policy
+
+If a managed rename rule already contains phrases that are not currently present in the hydrated cache, `Rename Policy` keeps those phrases visible and marks them as not currently observed so you can still remove them deliberately
+
+Use `Discard local changes` if you want to throw away the current unsaved draft and snap the maintainer editor back to the saved `source.json` entry
+
+Applying one policy keeps any unsaved draft from the other policy section in place so you can save them independently without losing local work
+
+`Statistics` surfaces phrase frequencies, multi-group counts, mixed-pattern warnings, and draft impact counts so you can make those edits from real hydrated data instead of guessing
 
 ## Refreshing Data
 
 Use `Update Database` when you want to refresh the local database of files from each magnet
 
-Use `Refresh` inside a selected source when you want to repull only that source or resume a completed archive download on ReadDebrid
+Use `Refresh` inside a selected source when you want to repull only that source or continue a `preparing` ZIP source from its saved Real-Debrid resume state
 
 ## Logs
 
@@ -86,6 +111,7 @@ The simulator keeps some local state in its SQLite cache so your workflow is les
 
 - lists of files in torrents
 - selected files per source
-- archive preview fixtures
+- unarchived file patterns per hydrated source
+- archive preview custom example files
 
 That state is local to your machine and lives under `simulator/.local/`

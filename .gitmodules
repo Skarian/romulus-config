@@ -2,3 +2,6 @@
 	path = references/romulus
 	url = https://github.com/Skarian/romulus
 	branch = main
+[submodule "references/ES-DE-Directories"]
+	path = references/ES-DE-Directories
+	url = https://github.com/retrogamecorps/ES-DE-Directories

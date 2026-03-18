@@ -18,7 +18,7 @@ Create a `source.json` like this:
   "version": 1,
   "entries": [
     {
-      "displayName": "Nintendo Gamecube",
+      "displayName": "Nintendo GameCube",
       "subfolder": "gc",
       "torrents": [
         {
@@ -32,7 +32,7 @@ Create a `source.json` like this:
 
 That gives you:
 
-- one source row in the app called `Nintendo Gamecube`
+- one source row in the app called `Nintendo GameCube`
 - downloads saved into the `gc` subfolder
 - files browsed from the root of the torrent
 
@@ -108,7 +108,7 @@ If you want the extracted files placed into a dedicated sub-folder per selected 
 
 ```json
 {
-  "displayName": "Sony Playstation",
+  "displayName": "Sony PlayStation",
   "subfolder": "psx",
   "unarchive": {
     "layout": {
@@ -211,7 +211,7 @@ Example:
 
 ```json
 {
-  "displayName": "Sony Playstation Portable",
+  "displayName": "Sony PlayStation Portable",
   "subfolder": "psp",
   "rename": {
     "pattern": "\\s*\\(USA\\)",
@@ -231,6 +231,8 @@ What this changes:
 - the final saved output name is renamed
 
 If you also use `dedicatedFolder` unarchive, you can give the top-level extract folder its own rename rule separately. That is covered in [config-reference.md](./config-reference.md)
+
+If the source is already hydrated in the simulator cache, use the simulator’s `Rename Policy` and `Statistics` sections for that source before you choose a regex. They now show the observed parenthetical phrases and the useful counts directly in the browser, and `Rename Policy` can write the managed rule back to `source.json` for you
 
 ## A Good Workflow
 

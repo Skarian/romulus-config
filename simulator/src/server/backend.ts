@@ -1,7 +1,19 @@
 import fs from "node:fs";
 import path from "node:path";
 
+import { normalizeArchiveSampleExtensions } from "../archiveSamplePolicy";
+import {
+  analyzeParentheticalSuffixes,
+  buildManagedRenameRule,
+  detectManagedRenamePolicy,
+} from "../policyAnalysis";
+import { buildPreviewEntries } from "../runtimeValidation";
 import { buildSimulatorState } from "../simulatorState";
+import {
+  readSourceDocument,
+  validateSourceDocument,
+  writeSourceDocumentAtomic,
+} from "../sourceDocument";
 import type {
   HydrationLogEntry,
   HydrationLogLevel,
@@ -10,6 +22,7 @@ import type {
   PreviewFixtureSample,
   HydrationSourceState,
   PreviewEntry,
+  SourceDocument,
   SimulatorState,
   SourceFilesState,
 } from "../types";
@@ -33,6 +46,8 @@ import {
 import { enumerateRemoteZip } from "./remoteZip";
 import {
   buildArchiveSourceFiles,
+  buildScopedArchiveSourceFiles,
+  buildScopedStandardSourceFiles,
   buildStandardSourceFiles,
 } from "./sourceFiles";
 
@@ -44,7 +59,37 @@ type BackendEvent = {
 
 type BackendSubscriber = (event: BackendEvent) => void;
 
+export type SourceEntryPolicyUpdateInput = {
+  entryId: string;
+  selectionStateKey: string;
+  displayName: string;
+  subfolder: string;
+  renamePolicy?: {
+    mode: "none" | "all" | "phrases";
+    phrases: string[];
+  };
+  ignoreGlobs?: string[];
+  confirmReplaceCustomRename?: boolean;
+};
+
+export type SourceEntryPolicyUpdateResult =
+  | {
+      status: "ok";
+    }
+  | {
+      status: "needs-confirmation";
+      kind: "custom-rename";
+      error: string;
+    };
+
 const MAX_LOGS = 300;
+
+class RetryableArchiveHydrationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "RetryableArchiveHydrationError";
+  }
+}
 
 export class SimulatorBackend {
   private readonly cacheDb: SimulatorCacheDb;
@@ -120,7 +165,11 @@ export class SimulatorBackend {
 
     const cached = this.cacheDb.getSourceCache(entry.hydrationKey);
     const previewFixtures = this.cacheDb.listPreviewFixtures(entry.hydrationKey);
-    const persistedSelectedRowIds = this.cacheDb.getSelectedRowIds(entry.hydrationKey);
+    const archiveSampleExtensions = this.cacheDb.getArchiveSampleExtensions(entry.hydrationKey);
+    const persistedSelectedRowIds = this.cacheDb.getSelectedRowIds(entry.selectionStateKey, {
+      previousEntryId: entry.id,
+      hydrationKey: entry.hydrationKey,
+    });
     const sourceMode = entry.scope.isArchiveSelection ? "archive" : "standard";
     if (!cached) {
       return {
@@ -132,7 +181,10 @@ export class SimulatorBackend {
         progressPercent: null,
         errorMessage: null,
         outerArchiveName: null,
+        archiveSampleExtensions,
         previewFixtures,
+        analysisFiles: [],
+        analysisOriginalNames: [],
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
@@ -148,7 +200,10 @@ export class SimulatorBackend {
         progressPercent: cached.progressPercent,
         errorMessage: cached.errorMessage,
         outerArchiveName: null,
+        archiveSampleExtensions,
         previewFixtures,
+        analysisFiles: [],
+        analysisOriginalNames: [],
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
@@ -166,12 +221,24 @@ export class SimulatorBackend {
         outerArchiveName: isArchivePayload(cached.payload)
           ? cached.payload.outerZip?.originalName ?? cached.payload.exactMatch.originalName
           : null,
+        archiveSampleExtensions,
         previewFixtures,
+        analysisFiles: [],
+        analysisOriginalNames: [],
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
     }
 
+    const analysisFiles =
+      cached.mode === "standard" && isReadyStandardPayload(cached.payload)
+        ? buildScopedStandardSourceFiles(entry, cached.payload.files)
+        : cached.mode === "archive" &&
+            isArchivePayload(cached.payload) &&
+            cached.payload.entries
+          ? buildScopedArchiveSourceFiles(cached.payload.entries)
+          : [];
+    const analysisOriginalNames = analysisFiles.map((file) => file.originalName);
     const files =
       cached.mode === "standard" && isReadyStandardPayload(cached.payload)
         ? buildStandardSourceFiles(entry, cached.payload.files)
@@ -185,7 +252,7 @@ export class SimulatorBackend {
       availableFileIds.has(fileId),
     );
     if (selectedRowIds.length !== persistedSelectedRowIds.length) {
-      this.cacheDb.setSelectedRowIds(entry.hydrationKey, selectedRowIds);
+      this.cacheDb.setSelectedRowIds(entry.selectionStateKey, selectedRowIds);
     }
 
     return {
@@ -196,11 +263,14 @@ export class SimulatorBackend {
       statusLabel: cached.statusLabel,
       progressPercent: cached.progressPercent,
       errorMessage: cached.errorMessage,
+      analysisFiles,
+      analysisOriginalNames,
       outerArchiveName:
         cached.mode === "archive" &&
         isArchivePayload(cached.payload)
           ? cached.payload.outerZip?.originalName ?? cached.payload.exactMatch.originalName
           : null,
+      archiveSampleExtensions,
       previewFixtures,
       selectedRowIds,
       files,
@@ -220,7 +290,7 @@ export class SimulatorBackend {
     }
   }
 
-  async runHydration(
+  runHydration(
     entryIds?: string[],
     options: { forceRefresh?: boolean } = {},
   ) {
@@ -236,9 +306,9 @@ export class SimulatorBackend {
       throw new Error("REAL_DEBRID_API_KEY is missing in simulator/.env.local");
     }
 
-    const entries = state.entries.filter(
+    const entries = uniqueEntriesByHydrationKey(state.entries.filter(
       (entry) => !entryIds || entryIds.includes(entry.id),
-    );
+    ));
     if (options.forceRefresh) {
       for (const entry of entries) {
         this.cacheDb.clearSourceCache(entry.hydrationKey);
@@ -253,7 +323,7 @@ export class SimulatorBackend {
     const runId = this.cacheDb.startHydrationRun(entries.length);
     this.hydrationRunning = true;
     this.publishState();
-    this.log("info", `Starting database hydration for ${entries.length} source(s).`);
+    this.log("info", `Starting database hydration for ${entries.length} source cache job(s).`);
     this.log("info", "Hydration is running strictly one source at a time.");
     this.log(
       "info",
@@ -266,7 +336,7 @@ export class SimulatorBackend {
         for (const [index, entry] of entries.entries()) {
           this.log(
             "info",
-            `Hydrating source ${index + 1}/${entries.length}: ${entry.displayName} (${entry.scope.isArchiveSelection ? "archive" : "standard"}).`,
+            `Hydrating source cache ${index + 1}/${entries.length}: ${entry.displayName} (${entry.scope.isArchiveSelection ? "archive" : "standard"}).`,
           );
           try {
             if (entry.scope.isArchiveSelection) {
@@ -278,13 +348,15 @@ export class SimulatorBackend {
           } catch (error) {
             failureCount += 1;
             const message = error instanceof Error ? error.message : String(error);
-            this.cacheDb.setSourceCache(
-              createErrorCacheRow(
-                entry.hydrationKey,
-                entry.scope.isArchiveSelection ? "archive" : "standard",
-                message,
-              ),
-            );
+            if (!(error instanceof RetryableArchiveHydrationError)) {
+              this.cacheDb.setSourceCache(
+                createErrorCacheRow(
+                  entry.hydrationKey,
+                  entry.scope.isArchiveSelection ? "archive" : "standard",
+                  message,
+                ),
+              );
+            }
             this.log("error", `${entry.displayName}: ${message}`);
             this.publishState();
           }
@@ -311,6 +383,7 @@ export class SimulatorBackend {
     })();
 
     this.currentRunPromise = runPromise;
+    void runPromise.catch(() => {});
     return runPromise;
   }
 
@@ -342,6 +415,22 @@ export class SimulatorBackend {
     });
   }
 
+  setArchiveSampleExtensions(entryId: string, fileExtensions: string[]) {
+    const state = this.buildState();
+    const entry = state.entries.find((candidate) => candidate.id === entryId);
+    if (!entry) {
+      throw new Error(`Unknown source entry: ${entryId}`);
+    }
+    if (!entry.unarchive) {
+      throw new Error("Unarchive must be configured before saving archive sample extensions");
+    }
+
+    return this.cacheDb.setArchiveSampleExtensions(
+      entry.hydrationKey,
+      normalizeArchiveSampleExtensions(fileExtensions),
+    );
+  }
+
   setSelectedRowIds(entryId: string, selectedRowIds: string[]) {
     const state = this.buildState();
     const entry = state.entries.find((candidate) => candidate.id === entryId);
@@ -358,8 +447,88 @@ export class SimulatorBackend {
       sourceFiles.sourceStatus === "ready"
         ? normalizedSelectedRowIds.filter((rowId) => availableFileIds.has(rowId))
         : normalizedSelectedRowIds;
-    this.cacheDb.setSelectedRowIds(entry.hydrationKey, nextSelectedRowIds);
+    this.cacheDb.setSelectedRowIds(entry.selectionStateKey, nextSelectedRowIds);
     return nextSelectedRowIds;
+  }
+
+  updateSourceEntryPolicy(
+    input: SourceEntryPolicyUpdateInput,
+  ): SourceEntryPolicyUpdateResult {
+    assertValidSourceEntryPolicyUpdateInput(input);
+    const state = this.buildState();
+    if (state.status !== "accepted") {
+      throw new Error("Config must be accepted before source policies can be edited");
+    }
+
+    const entry = resolveSelectedEntry(state.entries, input);
+    if (!entry) {
+      throw new Error("The selected source changed on disk. Reload the simulator state and try again.");
+    }
+
+    const sourceFiles = this.getSourceFiles(entry.id);
+    if (sourceFiles.sourceStatus !== "ready") {
+      throw new Error("Source files must be loaded before policies can be edited");
+    }
+
+    const analysis = analyzeParentheticalSuffixes(
+      sourceFiles.analysisOriginalNames ?? sourceFiles.files.map((file) => file.originalName),
+    );
+    if (input.renamePolicy) {
+      const detectedRenamePolicy = detectManagedRenamePolicy(
+        entry.renameRule,
+        analysis.parentheticalPhrases.map((phrase) => phrase.phrase),
+      );
+      if (detectedRenamePolicy.isCustom && !input.confirmReplaceCustomRename) {
+        return {
+          status: "needs-confirmation",
+          kind: "custom-rename",
+          error:
+            "This source already has a custom rename regex. Confirm replacement before overwriting it.",
+        };
+      }
+    }
+
+    const { configPath, schemaPath, rawDocument } = readSourceDocument(this.repoRoot);
+    const entries = rawDocument.entries;
+    if (!Array.isArray(entries)) {
+      throw new Error("The selected source could not be located in source.json");
+    }
+
+    const targetIndex = resolveSourceEntryWriteIndex(rawDocument as SourceDocument, entry);
+    if (targetIndex < 0 || targetIndex >= entries.length) {
+      throw new Error("The selected source changed on disk. Reload the simulator state and try again.");
+    }
+
+    const targetEntry = entries[targetIndex];
+    if (!targetEntry || typeof targetEntry !== "object" || Array.isArray(targetEntry)) {
+      throw new Error("The selected source entry is not editable");
+    }
+
+    if (input.renamePolicy) {
+      const availablePhrases = analysis.parentheticalPhrases.map((phrase) => phrase.phrase);
+      const nextRenameRule = buildManagedRenameRule(
+        input.renamePolicy.mode,
+        input.renamePolicy.phrases,
+        availablePhrases,
+      );
+      applyRenameRuleToDocumentEntry(targetEntry, nextRenameRule);
+    }
+    if (input.ignoreGlobs) {
+      applyIgnoreGlobsToDocumentEntry(
+        targetEntry,
+        normalizeIgnoreGlobs(input.ignoreGlobs),
+      );
+    }
+
+    const issues = validateSourceDocument(rawDocument as SourceDocument, schemaPath);
+    if (issues.length > 0) {
+      throw new Error(issues[0]?.message ?? "The updated source.json would be invalid");
+    }
+
+    writeSourceDocumentAtomic(configPath, rawDocument);
+    return {
+      status: "ok",
+    };
   }
 
   private async hydrateStandardEntry(
@@ -421,36 +590,61 @@ export class SimulatorBackend {
     }
 
     if (status.kind === "links-ready") {
-      this.log(
-        "info",
-        `${entry.displayName}: provider links are ready on torrent ${status.resumeMarker.torrentId}.`,
-      );
-      const outerZip = await client.materializeArchiveContainer(exactMatch, status);
-      this.log(
-        "info",
-        `${entry.displayName}: enumerating remote zip entries for ${outerZip.originalName}.`,
-      );
-      const entries = await enumerateRemoteZip(outerZip.archiveUrl, {
-        onLog: (message) => {
-          this.log("info", `${entry.displayName}: ${message}`, "verbose");
-          this.publishState();
-        },
-      });
-      this.cacheDb.setSourceCache(
-        createReadyArchiveCacheRow(
-          entry.hydrationKey,
-          exactMatch,
-          status.resumeMarker,
-          outerZip,
-          entries,
-        ),
-      );
-      this.log(
-        "success",
-        `${entry.displayName}: cached ${entries.length} archive entry row(s).`,
-      );
-      this.publishState();
-      return;
+      try {
+        this.log(
+          "info",
+          `${entry.displayName}: provider links are ready on torrent ${status.resumeMarker.torrentId}.`,
+        );
+        const outerZip = await client.materializeArchiveContainer(exactMatch, status);
+        this.log(
+          "info",
+          `${entry.displayName}: enumerating remote zip entries for ${outerZip.originalName}.`,
+        );
+        const entries = await enumerateRemoteZip(outerZip.archiveUrl, {
+          onLog: (message) => {
+            this.log("info", `${entry.displayName}: ${message}`, "verbose");
+            this.publishState();
+          },
+        });
+        try {
+          await client.releaseAcquisition(status.resumeMarker);
+        } catch (error) {
+          this.log(
+            "error",
+            `${entry.displayName}: could not delete provider torrent ${status.resumeMarker.torrentId} after archive enumeration (${error instanceof Error ? error.message : String(error)}).`,
+            "verbose",
+          );
+        }
+        this.cacheDb.setSourceCache(
+          createReadyArchiveCacheRow(
+            entry.hydrationKey,
+            exactMatch,
+            null,
+            outerZip,
+            entries,
+          ),
+        );
+        this.log(
+          "success",
+          `${entry.displayName}: cached ${entries.length} archive entry row(s).`,
+        );
+        this.publishState();
+        return;
+      } catch (error) {
+        this.cacheDb.setSourceCache(
+          createPreparingArchiveCacheRow(
+            entry.hydrationKey,
+            exactMatch,
+            status.resumeMarker,
+            "downloaded",
+            100,
+          ),
+        );
+        this.publishState();
+        throw new RetryableArchiveHydrationError(
+          `archive handling failed after provider links were ready (${error instanceof Error ? error.message : String(error)}). Refresh this source to retry from the prepared torrent`,
+        );
+      }
     }
 
     this.cacheDb.setSourceCache(
@@ -519,6 +713,96 @@ function normalizeLogMessage(message: string) {
   return message.endsWith(".") && !message.endsWith("...") ? message.slice(0, -1) : message;
 }
 
+function normalizeIgnoreGlobs(ignoreGlobs: string[]) {
+  return Array.from(
+    new Set(ignoreGlobs.map((glob) => glob.trim()).filter((glob) => glob.length > 0)),
+  );
+}
+
+function assertValidSourceEntryPolicyUpdateInput(
+  input: SourceEntryPolicyUpdateInput,
+) {
+  if (typeof input.entryId !== "string" || input.entryId.trim().length === 0) {
+    throw new Error("Invalid source entry policy payload");
+  }
+  if (
+    typeof input.selectionStateKey !== "string" ||
+    input.selectionStateKey.trim().length === 0 ||
+    typeof input.displayName !== "string" ||
+    input.displayName.trim().length === 0 ||
+    typeof input.subfolder !== "string" ||
+    input.subfolder.trim().length === 0
+  ) {
+    throw new Error("Invalid source entry policy payload");
+  }
+
+  if (input.renamePolicy) {
+    if (
+      !["none", "all", "phrases"].includes(input.renamePolicy.mode) ||
+      !Array.isArray(input.renamePolicy.phrases) ||
+      input.renamePolicy.phrases.some((phrase) => typeof phrase !== "string")
+    ) {
+      throw new Error("Invalid source entry policy payload");
+    }
+  }
+
+  if (
+    input.ignoreGlobs &&
+    (!Array.isArray(input.ignoreGlobs) ||
+      input.ignoreGlobs.some((glob) => typeof glob !== "string"))
+  ) {
+    throw new Error("Invalid source entry policy payload");
+  }
+
+  if (
+    typeof input.confirmReplaceCustomRename !== "undefined" &&
+    typeof input.confirmReplaceCustomRename !== "boolean"
+  ) {
+    throw new Error("Invalid source entry policy payload");
+  }
+}
+
+function applyRenameRuleToDocumentEntry(
+  entry: Record<string, unknown>,
+  renameRule: PreviewEntry["renameRule"],
+) {
+  if (!renameRule) {
+    delete entry.rename;
+    return;
+  }
+
+  entry.rename = {
+    pattern: renameRule.pattern,
+    replacement: renameRule.replacement,
+  };
+}
+
+function applyIgnoreGlobsToDocumentEntry(
+  entry: Record<string, unknown>,
+  ignoreGlobs: string[],
+) {
+  if (ignoreGlobs.length === 0) {
+    if (
+      entry.ignore &&
+      typeof entry.ignore === "object" &&
+      !Array.isArray(entry.ignore)
+    ) {
+      delete (entry.ignore as Record<string, unknown>).glob;
+      if (Object.keys(entry.ignore as Record<string, unknown>).length === 0) {
+        delete entry.ignore;
+      }
+    } else {
+      delete entry.ignore;
+    }
+    return;
+  }
+
+  if (!entry.ignore || typeof entry.ignore !== "object" || Array.isArray(entry.ignore)) {
+    entry.ignore = {};
+  }
+  (entry.ignore as Record<string, unknown>).glob = ignoreGlobs;
+}
+
 export function ensureLocalArtifacts(repoRoot: string) {
   fs.mkdirSync(path.join(repoRoot, "simulator/.local"), { recursive: true });
 }
@@ -530,4 +814,60 @@ export function previewFixtureKey(
   return sourceFileId === null
     ? `${hydrationKey}::archive-scope`
     : `${hydrationKey}::${sourceFileId}`;
+}
+
+function uniqueEntriesByHydrationKey(entries: PreviewEntry[]) {
+  const uniqueEntries = new Map<string, PreviewEntry>();
+  for (const entry of entries) {
+    if (!uniqueEntries.has(entry.hydrationKey)) {
+      uniqueEntries.set(entry.hydrationKey, entry);
+    }
+  }
+  return [...uniqueEntries.values()];
+}
+
+function resolveSourceEntryWriteIndex(
+  document: SourceDocument,
+  selectedEntry: PreviewEntry,
+) {
+  const freshEntries = buildPreviewEntries(document);
+  const exactIndex = freshEntries.findIndex((candidate) => candidate.id === selectedEntry.id);
+  if (exactIndex >= 0) {
+    return exactIndex;
+  }
+
+  const fallbackMatches = freshEntries
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(
+      ({ candidate }) =>
+        candidate.selectionStateKey === selectedEntry.selectionStateKey &&
+        candidate.displayName === selectedEntry.displayName &&
+        candidate.subfolder === selectedEntry.subfolder,
+    );
+  if (fallbackMatches.length === 1) {
+    return fallbackMatches[0].index;
+  }
+
+  return -1;
+}
+
+function resolveSelectedEntry(
+  entries: PreviewEntry[],
+  input: Pick<
+    SourceEntryPolicyUpdateInput,
+    "entryId" | "selectionStateKey" | "displayName" | "subfolder"
+  >,
+) {
+  const exactMatch = entries.find((candidate) => candidate.id === input.entryId);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const fallbackMatches = entries.filter(
+    (candidate) =>
+      candidate.selectionStateKey === input.selectionStateKey &&
+      candidate.displayName === input.displayName &&
+      candidate.subfolder === input.subfolder,
+  );
+  return fallbackMatches.length === 1 ? fallbackMatches[0] : null;
 }

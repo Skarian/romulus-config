@@ -9,8 +9,21 @@ import { archiveBaseName, isSupportedArchiveName } from "./archiveSupport";
 
 export type PreviewTreeNode = {
   name: string;
+  pathKey: string;
   kind: "folder" | "file";
   children: PreviewTreeNode[];
+};
+
+type MutablePreviewTreeNode = PreviewTreeNode & {
+  rawName: string;
+  renameEffects: Array<(nextName: string) => void>;
+  children: MutablePreviewTreeNode[];
+};
+
+export type ArchiveFixtureSampleDescriptor = PreviewFixtureSample & {
+  generated: boolean;
+  outputName: string;
+  outputPathKey: string | null;
 };
 
 export type ArchiveFixtureDescriptor = {
@@ -20,7 +33,9 @@ export type ArchiveFixtureDescriptor = {
   archiveBaseName: string;
   baseSegments: string[];
   outerFolderName: string | null;
-  samples: Array<PreviewFixtureSample & { outputName: string }>;
+  outerFolderPathKey: string | null;
+  customSamples: PreviewFixtureSample[];
+  samples: ArchiveFixtureSampleDescriptor[];
 };
 
 export function buildDownloadPreview(
@@ -31,15 +46,12 @@ export function buildDownloadPreview(
   tree: PreviewTreeNode;
   archiveFixtures: ArchiveFixtureDescriptor[];
 } {
-  const root: PreviewTreeNode = {
-    name: "/",
-    kind: "folder",
-    children: [],
-  };
+  const root = createTreeNode("", "/", "/", "folder");
   const archiveFixtures: ArchiveFixtureDescriptor[] = [];
   const fixtureMap = new Map(
     (sourceFiles?.previewFixtures ?? []).map((fixture) => [fixture.fixtureKey, fixture]),
   );
+  const archiveSampleExtensions = sourceFiles?.archiveSampleExtensions ?? [];
 
   if (!sourceFiles) {
     return {
@@ -48,29 +60,34 @@ export function buildDownloadPreview(
     };
   }
 
+  const baseNode = getOrCreateSharedFolderPath(root, normalizeSegments(entry.subfolder));
+  const baseSegments = baseNode.pathKey.length === 0 ? [] : baseNode.pathKey.split("/");
+
   for (const row of selectedRows) {
     if (row.isArchiveCandidate && entry.unarchive) {
       appendArchiveFixtureToTree({
-        root,
         entry,
         fixtureMap,
+        archiveSampleExtensions,
         archiveFixtures,
         descriptor:
-          resolveRootArchiveFixtureDescriptor(entry, sourceFiles, fixtureMap, row),
-        baseSegments: archiveBaseSegments(entry, sourceFiles, row),
+          resolveRootArchiveFixtureDescriptor(
+            entry,
+            fixtureMap,
+            archiveSampleExtensions,
+            row,
+            baseSegments,
+          ),
+        baseNode,
       });
       continue;
     }
 
-    if (row.kind === "archive") {
-      insertPath(root, [...normalizeSegments(entry.subfolder), finalOutputName(entry, row.originalName, null)]);
-      continue;
-    }
-
-    insertPath(root, [
-      ...normalizeSegments(entry.subfolder),
+    insertUniqueChild(
+      baseNode,
       finalOutputName(entry, row.originalName, null),
-    ]);
+      "file",
+    );
   }
 
   sortTree(root);
@@ -103,17 +120,7 @@ export function defaultArchiveFixture(
     sourceFileId,
     archiveDisplayName,
     archiveBaseName: archiveBaseName(archiveDisplayName),
-    samples:
-      entry.unarchive?.layout.mode === "flat"
-        ? [
-            {
-              id: "default",
-              originalName: `[${archiveBaseName(archiveDisplayName)}]`,
-              relativeDirectory: "",
-              outputNameOverride: null,
-            },
-          ]
-        : [],
+    samples: [],
     updatedAt: "",
   };
 }
@@ -153,22 +160,40 @@ export function applyRenameRule(
   }
 }
 
+function createTreeNode(
+  pathKey: string,
+  displayName: string,
+  rawName: string,
+  kind: "folder" | "file",
+): MutablePreviewTreeNode {
+  return {
+    name: displayName,
+    rawName,
+    pathKey,
+    kind,
+    renameEffects: [],
+    children: [],
+  };
+}
+
 function describeFixture(
   entry: PreviewEntry,
   fixture: PreviewFixture,
   baseSegments: string[],
+  archiveSampleExtensions: string[],
 ): ArchiveFixtureDescriptor {
-  const fixtureSamples =
-    entry.unarchive?.layout.mode === "flat" && fixture.samples.length === 0
-      ? [
-          {
-            id: "default",
-            originalName: `[${fixture.archiveBaseName}]`,
-            relativeDirectory: "",
-            outputNameOverride: null,
-          },
-        ]
-      : fixture.samples;
+  const generatedSamples = archiveSampleExtensions.map((extension) => ({
+    id: `generated:${extension}`,
+    originalName: `${fixture.archiveBaseName}${extension}`,
+    relativeDirectory: "",
+    outputNameOverride: null,
+    generated: true,
+  }));
+  const customSamples = fixture.samples.map((sample) => ({
+    ...sample,
+    generated: false,
+  }));
+  const fixtureSamples = [...generatedSamples, ...customSamples];
 
   return {
     fixtureKey: fixture.fixtureKey,
@@ -183,6 +208,8 @@ function describeFixture(
             fixture.archiveBaseName,
           )
         : null,
+    outerFolderPathKey: null,
+    customSamples: [...fixture.samples],
     samples: fixtureSamples.map((sample) => ({
       ...sample,
       outputName: finalOutputName(
@@ -191,69 +218,54 @@ function describeFixture(
         sample.outputNameOverride,
         !isSupportedArchiveName(sample.originalName),
       ),
+      outputPathKey: null,
     })),
   };
 }
 
-function insertPath(root: PreviewTreeNode, segments: string[]) {
-  let pointer = root;
-  for (const [index, segment] of segments.entries()) {
-    const kind = index === segments.length - 1 ? "file" : "folder";
-    let child = pointer.children.find(
-      (candidate) => candidate.name === segment && candidate.kind === kind,
-    );
-    if (!child) {
-      child = {
-        name: segment,
-        kind,
-        children: [],
-      };
-      pointer.children.push(child);
-    }
-    pointer = child;
-  }
-}
-
 function resolveRootArchiveFixtureDescriptor(
   entry: PreviewEntry,
-  sourceFiles: SourceFilesState,
   fixtureMap: Map<string, PreviewFixture>,
+  archiveSampleExtensions: string[],
   row: SourceFileRow,
+  baseSegments: string[],
 ) {
-  const baseSegments = archiveBaseSegments(entry, sourceFiles, row);
   const fixtureKey = previewFixtureKey(entry.hydrationKey, row.id);
   const fixture =
     fixtureMap.get(fixtureKey) ??
     defaultArchiveFixture(entry, fixtureKey, row.id, row.originalName);
-  return describeFixture(entry, fixture, baseSegments);
+  return describeFixture(entry, fixture, baseSegments, archiveSampleExtensions);
 }
 
 function appendArchiveFixtureToTree({
-  root,
   entry,
   fixtureMap,
+  archiveSampleExtensions,
   archiveFixtures,
   descriptor,
-  baseSegments,
+  baseNode,
 }: {
-  root: PreviewTreeNode;
   entry: PreviewEntry;
   fixtureMap: Map<string, PreviewFixture>;
+  archiveSampleExtensions: string[];
   archiveFixtures: ArchiveFixtureDescriptor[];
   descriptor: ArchiveFixtureDescriptor;
-  baseSegments: string[];
+  baseNode: MutablePreviewTreeNode;
 }) {
   archiveFixtures.push(descriptor);
-  const outputBaseSegments = descriptor.outerFolderName
-    ? [...baseSegments, descriptor.outerFolderName]
-    : baseSegments;
-
-  if (descriptor.outerFolderName) {
-    ensureFolderPath(root, outputBaseSegments);
-  }
+  const outputBaseNode = descriptor.outerFolderName
+    ? insertUniqueChild(baseNode, descriptor.outerFolderName, "folder", (nextName) => {
+        descriptor.outerFolderName = nextName;
+      })
+    : baseNode;
+  descriptor.outerFolderPathKey =
+    outputBaseNode.kind === "folder" && descriptor.outerFolderName
+      ? outputBaseNode.pathKey
+      : null;
+  descriptor.baseSegments = baseNode.pathKey.length === 0 ? [] : baseNode.pathKey.split("/");
 
   for (const sample of descriptor.samples) {
-    const sampleBaseSegments = outputBaseSegments;
+    sample.outputPathKey = null;
 
     if (entry.unarchive?.recursive && isArchiveCandidateName(sample.originalName)) {
       const nestedFixtureKey = nestedPreviewFixtureKey(descriptor.fixtureKey, sample.id);
@@ -261,48 +273,118 @@ function appendArchiveFixtureToTree({
         fixtureMap.get(nestedFixtureKey) ??
         defaultArchiveFixture(entry, nestedFixtureKey, null, sample.originalName);
       appendArchiveFixtureToTree({
-        root,
         entry,
         fixtureMap,
+        archiveSampleExtensions,
         archiveFixtures,
-        descriptor: describeFixture(entry, nestedFixture, sampleBaseSegments),
-        baseSegments: sampleBaseSegments,
+        descriptor: describeFixture(
+          entry,
+          nestedFixture,
+          outputBaseNode.pathKey.length === 0 ? [] : outputBaseNode.pathKey.split("/"),
+          archiveSampleExtensions,
+        ),
+        baseNode: outputBaseNode,
       });
       continue;
     }
 
-    insertPath(root, [...sampleBaseSegments, sample.outputName]);
+    const sampleNode = insertUniqueChild(
+      outputBaseNode,
+      sample.outputName,
+      "file",
+      (nextName) => {
+        sample.outputName = nextName;
+      },
+    );
+    sample.outputPathKey = sampleNode.pathKey;
   }
-}
-
-function archiveBaseSegments(
-  entry: PreviewEntry,
-  _sourceFiles: SourceFilesState,
-  _row: SourceFileRow,
-) {
-  return normalizeSegments(entry.subfolder);
 }
 
 function nestedPreviewFixtureKey(parentFixtureKey: string, sampleId: string) {
   return `${parentFixtureKey}::sample:${sampleId}`;
 }
 
-function ensureFolderPath(root: PreviewTreeNode, segments: string[]) {
+function getOrCreateSharedFolderPath(root: MutablePreviewTreeNode, segments: string[]) {
   let pointer = root;
   for (const segment of segments) {
-    let child = pointer.children.find(
-      (candidate) => candidate.name === segment && candidate.kind === "folder",
+    const pointerChildren = pointer.children as MutablePreviewTreeNode[];
+    let child = pointerChildren.find(
+      (candidate) => candidate.rawName === segment && candidate.kind === "folder",
     );
     if (!child) {
-      child = {
-        name: segment,
-        kind: "folder",
-        children: [],
-      };
-      pointer.children.push(child);
+      child = createTreeNode(
+        buildPathKey(pointer.pathKey, segment),
+        segment,
+        segment,
+        "folder",
+      );
+      pointerChildren.push(child);
     }
     pointer = child;
   }
+  return pointer;
+}
+
+function insertUniqueChild(
+  parent: MutablePreviewTreeNode,
+  rawName: string,
+  kind: "folder" | "file",
+  onRename?: (nextName: string) => void,
+) {
+  const parentChildren = parent.children as MutablePreviewTreeNode[];
+  const siblings = parentChildren.filter(
+    (candidate) => candidate.kind === kind && candidate.rawName === rawName,
+  );
+  if (siblings.length === 0) {
+    const child = createTreeNode(
+      buildPathKey(parent.pathKey, rawName),
+      rawName,
+      rawName,
+      kind,
+    );
+    if (onRename) {
+      child.renameEffects.push(onRename);
+    }
+    parentChildren.push(child);
+    return child;
+  }
+
+  if (siblings.length === 1 && siblings[0].name === rawName) {
+    renameTreeNode(siblings[0], formatDuplicateName(rawName, 1));
+  }
+
+  const duplicateIndex = siblings.length + 1;
+  const displayName = formatDuplicateName(rawName, duplicateIndex);
+  const child = createTreeNode(
+    buildPathKey(parent.pathKey, displayName),
+    displayName,
+    rawName,
+    kind,
+  );
+  if (onRename) {
+    child.renameEffects.push(onRename);
+  }
+  parentChildren.push(child);
+  return child;
+}
+
+function renameTreeNode(node: MutablePreviewTreeNode, nextName: string) {
+  node.name = nextName;
+  node.renameEffects.forEach((effect) => effect(nextName));
+}
+
+function formatDuplicateName(rawName: string, duplicateIndex: number) {
+  const extensionMatch = rawName.match(/(\.[^.]+)$/);
+  if (!extensionMatch || rawName.startsWith(".")) {
+    return `${rawName} (${duplicateIndex})`;
+  }
+  const extension = extensionMatch[0];
+  const stem = rawName.slice(0, -extension.length);
+  return `${stem} (${duplicateIndex})${extension}`;
+}
+
+function buildPathKey(parentPathKey: string, segment: string) {
+  return parentPathKey.length === 0 ? segment : `${parentPathKey}/${segment}`;
 }
 
 function normalizeSegments(input: string) {

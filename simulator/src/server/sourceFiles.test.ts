@@ -6,14 +6,19 @@ import type {
   CachedArchiveEntryDescriptor,
   CachedProviderFileRecord,
 } from "./cacheDb";
-import { buildArchiveSourceFiles, buildStandardSourceFiles } from "./sourceFiles";
+import {
+  buildArchiveSourceFiles,
+  buildScopedArchiveSourceFiles,
+  buildScopedStandardSourceFiles,
+  buildStandardSourceFiles,
+} from "./sourceFiles";
 
 test("buildStandardSourceFiles applies scope before ignore globs and sorts by original name", () => {
   const [entry] = buildPreviewEntries({
     version: 1,
     entries: [
       {
-        displayName: "Nintendo Gamecube",
+        displayName: "Nintendo GameCube",
         subfolder: "gc",
         scope: {
           path: "/games/",
@@ -82,6 +87,56 @@ test("buildArchiveSourceFiles applies ignore globs to archive entry basenames", 
   assert.equal(result.length, 1);
   assert.equal(result[0].originalName, "Metroid.nes");
   assert.equal(result[0].relativePath, "/A/Metroid.nes");
+});
+
+test("buildScopedStandardSourceFiles keeps scoped rows before ignore filtering", () => {
+  const [entry] = buildPreviewEntries({
+    version: 1,
+    entries: [
+      {
+        displayName: "Nintendo Game Boy",
+        subfolder: "gb",
+        scope: {
+          path: "/roms/",
+        },
+        ignore: {
+          glob: ["*.txt"],
+        },
+        torrents: [
+          {
+            url: "magnet:?xt=urn:btih:RAW",
+          },
+        ],
+      },
+    ],
+  });
+
+  const files: CachedProviderFileRecord[] = [
+    providerFile("/roms/Alpha.gb", 10),
+    providerFile("/roms/notes.txt", 1),
+    providerFile("/other/Bravo.gb", 12),
+  ];
+
+  const result = buildScopedStandardSourceFiles(entry, files);
+
+  assert.deepEqual(
+    result.map((file) => file.originalName),
+    ["Alpha.gb", "notes.txt"],
+  );
+});
+
+test("buildScopedArchiveSourceFiles keeps archive rows before ignore filtering", () => {
+  const files: CachedArchiveEntryDescriptor[] = [
+    archiveEntry("Games/Alpha.gb", 10),
+    archiveEntry("Games/readme.txt", 1),
+  ];
+
+  const result = buildScopedArchiveSourceFiles(files);
+
+  assert.deepEqual(
+    result.map((file) => file.originalName),
+    ["Alpha.gb", "readme.txt"],
+  );
 });
 
 test("buildStandardSourceFiles treats parentheses literally in ignore globs like the app", () => {
@@ -250,7 +305,7 @@ test("buildStandardSourceFiles only marks zip, rar, and 7z as archive candidates
     version: 1,
     entries: [
       {
-        displayName: "Nintendo Gamecube",
+        displayName: "Nintendo GameCube",
         subfolder: "gc",
         torrents: [
           {

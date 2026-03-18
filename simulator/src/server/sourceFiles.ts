@@ -11,10 +11,18 @@ export function buildStandardSourceFiles(
   entry: PreviewEntry,
   files: CachedProviderFileRecord[],
 ): SourceFileRow[] {
-  const matcher = compileIgnoreMatcher(entry.ignoreGlobs);
+  return filterIgnoredSourceFiles(
+    buildScopedStandardSourceFiles(entry, files),
+    entry.ignoreGlobs,
+  );
+}
+
+export function buildScopedStandardSourceFiles(
+  entry: PreviewEntry,
+  files: CachedProviderFileRecord[],
+): SourceFileRow[] {
   return files
     .filter((file) => matchesScope(entry, normalizeProviderPath(file.path)))
-    .filter((file) => !matcher(file.originalName))
     .map((file) => ({
       id: file.providerFileId,
       originalName: file.originalName,
@@ -27,13 +35,27 @@ export function buildStandardSourceFiles(
     .sort((left, right) => left.originalName.localeCompare(right.originalName));
 }
 
+export function listStandardSourceOriginalNames(
+  entry: PreviewEntry,
+  files: CachedProviderFileRecord[],
+) {
+  return buildScopedStandardSourceFiles(entry, files).map((file) => file.originalName);
+}
+
 export function buildArchiveSourceFiles(
   entry: PreviewEntry,
   files: CachedArchiveEntryDescriptor[],
 ): SourceFileRow[] {
-  const matcher = compileIgnoreMatcher(entry.ignoreGlobs);
+  return filterIgnoredSourceFiles(
+    buildScopedArchiveSourceFiles(files),
+    entry.ignoreGlobs,
+  );
+}
+
+export function buildScopedArchiveSourceFiles(
+  files: CachedArchiveEntryDescriptor[],
+): SourceFileRow[] {
   return files
-    .filter((file) => !matcher(basename(file.entryPath)))
     .map((file) => ({
       id: archiveEntryId(file),
       originalName: basename(file.entryPath),
@@ -44,6 +66,12 @@ export function buildArchiveSourceFiles(
       kind: "archive" as const,
     }))
     .sort((left, right) => left.originalName.localeCompare(right.originalName));
+}
+
+export function listArchiveSourceOriginalNames(
+  files: CachedArchiveEntryDescriptor[],
+) {
+  return buildScopedArchiveSourceFiles(files).map((file) => file.originalName);
 }
 
 export function isArchiveCandidate(pathValue: string): boolean {
@@ -81,4 +109,9 @@ function archiveEntryId(entry: CachedArchiveEntryDescriptor): string {
     entry.identity.crc32,
     entry.identity.normalizedPath,
   ].join(":");
+}
+
+function filterIgnoredSourceFiles(sourceFiles: SourceFileRow[], ignoreGlobs: string[]) {
+  const matcher = compileIgnoreMatcher(ignoreGlobs);
+  return sourceFiles.filter((file) => !matcher(file.originalName));
 }

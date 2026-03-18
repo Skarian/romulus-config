@@ -17,7 +17,7 @@ test("buildDownloadPreview applies dedicated-folder and entry rename for standar
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.cue$",
@@ -73,6 +73,7 @@ test("buildDownloadPreview applies dedicated-folder and entry rename for standar
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [fixture],
     files: selectedRows,
   };
@@ -92,7 +93,7 @@ test("buildDownloadPreview saves non-archive archive-selection rows directly int
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.bin$",
@@ -134,6 +135,7 @@ test("buildDownloadPreview saves non-archive archive-selection rows directly int
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: "Game (USA).zip",
+    archiveSampleExtensions: [],
     previewFixtures: [],
     files: selectedRows,
   };
@@ -151,7 +153,7 @@ test("buildDownloadPreview keeps the dedicated folder visible before sample file
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         unarchive: {
           layout: {
@@ -188,6 +190,7 @@ test("buildDownloadPreview keeps the dedicated folder visible before sample file
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -206,84 +209,12 @@ test("buildDownloadPreview keeps the dedicated folder visible before sample file
   ]);
 });
 
-test("buildDownloadPreview ignores persisted output overrides and uses current rename rules", () => {
+test("buildDownloadPreview generates archive samples from source-level extensions", () => {
   const [entry] = buildPreviewEntries({
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
-        subfolder: "psx",
-        rename: {
-          pattern: "\\.cue$",
-          replacement: ".chd",
-        },
-        unarchive: {
-          layout: {
-            mode: "dedicatedFolder",
-          },
-        },
-        torrents: [
-          {
-            url: "magnet:?xt=urn:btih:AAA",
-          },
-        ],
-      },
-    ],
-  });
-
-  const selectedRows: SourceFileRow[] = [
-    {
-      id: "archive-row",
-      originalName: "Ridge Racer.7z",
-      relativePath: "/Ridge Racer.7z",
-      sizeBytes: 1,
-      partLabel: null,
-      isArchiveCandidate: true,
-      kind: "standard",
-    },
-  ];
-
-  const sourceFiles: SourceFilesState = {
-    entryId: entry.id,
-    sourceStatus: "ready",
-    sourceMode: "standard",
-    updatedAt: null,
-    statusLabel: null,
-    progressPercent: null,
-    errorMessage: null,
-    outerArchiveName: null,
-    previewFixtures: [
-      {
-        ...defaultStandardArchiveFixture(entry, selectedRows[0]),
-        samples: [
-          {
-            id: "sample-1",
-            originalName: "Ridge Racer.cue",
-            relativeDirectory: "",
-            outputNameOverride: "old-name.bin",
-          },
-        ],
-        updatedAt: new Date().toISOString(),
-      },
-    ],
-    files: selectedRows,
-  };
-
-  const result = buildDownloadPreview(entry, sourceFiles, selectedRows);
-
-  assert.deepEqual(flattenTree(result.tree), [
-    "/psx",
-    "/psx/Ridge Racer",
-    "/psx/Ridge Racer/Ridge Racer.chd",
-  ]);
-});
-
-test("buildDownloadPreview keeps original directory input out of the final output tree", () => {
-  const [entry] = buildPreviewEntries({
-    version: 1,
-    entries: [
-      {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.cue$",
@@ -324,6 +255,144 @@ test("buildDownloadPreview keeps original directory input out of the final outpu
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [".cue", ".bin"],
+    previewFixtures: [],
+    files: selectedRows,
+  };
+
+  const result = buildDownloadPreview(entry, sourceFiles, selectedRows);
+
+  assert.deepEqual(flattenTree(result.tree), [
+    "/psx",
+    "/psx/Ridge Racer.bin",
+    "/psx/Ridge Racer.chd",
+  ]);
+  assert.deepEqual(
+    result.archiveFixtures[0]?.samples.map((sample) => sample.generated),
+    [true, true],
+  );
+});
+
+test("buildDownloadPreview ignores persisted output overrides and uses current rename rules", () => {
+  const [entry] = buildPreviewEntries({
+    version: 1,
+    entries: [
+      {
+        displayName: "Sony PlayStation",
+        subfolder: "psx",
+        rename: {
+          pattern: "\\.cue$",
+          replacement: ".chd",
+        },
+        unarchive: {
+          layout: {
+            mode: "dedicatedFolder",
+          },
+        },
+        torrents: [
+          {
+            url: "magnet:?xt=urn:btih:AAA",
+          },
+        ],
+      },
+    ],
+  });
+
+  const selectedRows: SourceFileRow[] = [
+    {
+      id: "archive-row",
+      originalName: "Ridge Racer.7z",
+      relativePath: "/Ridge Racer.7z",
+      sizeBytes: 1,
+      partLabel: null,
+      isArchiveCandidate: true,
+      kind: "standard",
+    },
+  ];
+
+  const sourceFiles: SourceFilesState = {
+    entryId: entry.id,
+    sourceStatus: "ready",
+    sourceMode: "standard",
+    updatedAt: null,
+    statusLabel: null,
+    progressPercent: null,
+    errorMessage: null,
+    outerArchiveName: null,
+    archiveSampleExtensions: [],
+    previewFixtures: [
+      {
+        ...defaultStandardArchiveFixture(entry, selectedRows[0]),
+        samples: [
+          {
+            id: "sample-1",
+            originalName: "Ridge Racer.cue",
+            relativeDirectory: "",
+            outputNameOverride: "old-name.bin",
+          },
+        ],
+        updatedAt: new Date().toISOString(),
+      },
+    ],
+    files: selectedRows,
+  };
+
+  const result = buildDownloadPreview(entry, sourceFiles, selectedRows);
+
+  assert.deepEqual(flattenTree(result.tree), [
+    "/psx",
+    "/psx/Ridge Racer",
+    "/psx/Ridge Racer/Ridge Racer.chd",
+  ]);
+});
+
+test("buildDownloadPreview keeps original directory input out of the final output tree", () => {
+  const [entry] = buildPreviewEntries({
+    version: 1,
+    entries: [
+      {
+        displayName: "Sony PlayStation",
+        subfolder: "psx",
+        rename: {
+          pattern: "\\.cue$",
+          replacement: ".chd",
+        },
+        unarchive: {
+          layout: {
+            mode: "flat",
+          },
+        },
+        torrents: [
+          {
+            url: "magnet:?xt=urn:btih:AAA",
+          },
+        ],
+      },
+    ],
+  });
+
+  const selectedRows: SourceFileRow[] = [
+    {
+      id: "archive-row",
+      originalName: "Ridge Racer.7z",
+      relativePath: "/Ridge Racer.7z",
+      sizeBytes: 1,
+      partLabel: null,
+      isArchiveCandidate: true,
+      kind: "standard",
+    },
+  ];
+
+  const sourceFiles: SourceFilesState = {
+    entryId: entry.id,
+    sourceStatus: "ready",
+    sourceMode: "standard",
+    updatedAt: null,
+    statusLabel: null,
+    progressPercent: null,
+    errorMessage: null,
+    outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -354,7 +423,7 @@ test("buildDownloadPreview uses the selected archive entry name for dedicated re
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         scope: {
           path: "/packs/Game.zip",
@@ -394,6 +463,7 @@ test("buildDownloadPreview uses the selected archive entry name for dedicated re
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: "Game.zip",
+    archiveSampleExtensions: [],
     previewFixtures: [],
     files: selectedRows,
   };
@@ -406,12 +476,12 @@ test("buildDownloadPreview uses the selected archive entry name for dedicated re
   ]);
 });
 
-test("buildDownloadPreview recursively expands nested archive samples", () => {
+test("buildDownloadPreview keeps nested archive outputs empty without a pattern or custom samples", () => {
   const [entry] = buildPreviewEntries({
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         unarchive: {
           recursive: true,
@@ -449,6 +519,7 @@ test("buildDownloadPreview recursively expands nested archive samples", () => {
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -468,10 +539,7 @@ test("buildDownloadPreview recursively expands nested archive samples", () => {
 
   const result = buildDownloadPreview(entry, sourceFiles, selectedRows);
 
-  assert.deepEqual(flattenTree(result.tree), [
-    "/psx",
-    "/psx/[Disc Set]",
-  ]);
+  assert.deepEqual(flattenTree(result.tree), ["/psx"]);
 });
 
 test("buildDownloadPreview does not apply entry rename to extracted archive filenames", () => {
@@ -479,7 +547,7 @@ test("buildDownloadPreview does not apply entry rename to extracted archive file
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.zip$",
@@ -520,6 +588,7 @@ test("buildDownloadPreview does not apply entry rename to extracted archive file
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -550,7 +619,7 @@ test("buildDownloadPreview keeps flat standard archive extraction in the entry s
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.cue$",
@@ -591,6 +660,7 @@ test("buildDownloadPreview keeps flat standard archive extraction in the entry s
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -621,7 +691,7 @@ test("buildDownloadPreview keeps flat archive-selection extraction in the entry 
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         scope: {
           path: "/packs/Game.zip",
@@ -665,6 +735,7 @@ test("buildDownloadPreview keeps flat archive-selection extraction in the entry 
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: "Game.zip",
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         fixtureKey: `${entry.hydrationKey}::inner-archive`,
@@ -698,7 +769,7 @@ test("buildDownloadPreview keeps recursive flat extraction in the entry subfolde
     version: 1,
     entries: [
       {
-        displayName: "Sony Playstation",
+        displayName: "Sony PlayStation",
         subfolder: "psx",
         rename: {
           pattern: "\\.cue$",
@@ -740,6 +811,7 @@ test("buildDownloadPreview keeps recursive flat extraction in the entry subfolde
     progressPercent: null,
     errorMessage: null,
     outerArchiveName: null,
+    archiveSampleExtensions: [],
     previewFixtures: [
       {
         ...defaultStandardArchiveFixture(entry, selectedRows[0]),
@@ -777,6 +849,70 @@ test("buildDownloadPreview keeps recursive flat extraction in the entry subfolde
   assert.deepEqual(flattenTree(result.tree), [
     "/psx",
     "/psx/Track 01.chd",
+  ]);
+});
+
+test("buildDownloadPreview numbers duplicate direct outputs instead of collapsing them", () => {
+  const [entry] = buildPreviewEntries({
+    version: 1,
+    entries: [
+      {
+        displayName: "Sony PlayStation",
+        subfolder: "psx",
+        rename: {
+          pattern: "\\s*\\([^)]*\\)",
+          replacement: "",
+        },
+        torrents: [
+          {
+            url: "magnet:?xt=urn:btih:AAA",
+          },
+        ],
+      },
+    ],
+  });
+
+  const selectedRows: SourceFileRow[] = [
+    {
+      id: "row-1",
+      originalName: "Alpha (USA).chd",
+      relativePath: "/Alpha (USA).chd",
+      sizeBytes: 1,
+      partLabel: null,
+      isArchiveCandidate: false,
+      kind: "standard",
+    },
+    {
+      id: "row-2",
+      originalName: "Alpha (Japan).chd",
+      relativePath: "/Alpha (Japan).chd",
+      sizeBytes: 1,
+      partLabel: null,
+      isArchiveCandidate: false,
+      kind: "standard",
+    },
+  ];
+
+  const sourceFiles: SourceFilesState = {
+    entryId: entry.id,
+    sourceStatus: "ready",
+    sourceMode: "standard",
+    updatedAt: null,
+    statusLabel: null,
+    progressPercent: null,
+    errorMessage: null,
+    outerArchiveName: null,
+    archiveSampleExtensions: [],
+    previewFixtures: [],
+    files: selectedRows,
+  };
+
+  const result = buildDownloadPreview(entry, sourceFiles, selectedRows);
+
+  assert.deepEqual(flattenTree(result.tree), [
+    "/psx",
+    "/psx/Alpha (1).chd",
+    "/psx/Alpha (2).chd",
   ]);
 });
 

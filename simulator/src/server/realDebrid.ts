@@ -75,6 +75,11 @@ type ProviderSelectionCandidate = {
   selectionId: string;
 };
 
+type ProviderSource = {
+  magnetUri: string;
+  partLabel: string | null;
+};
+
 class RealDebridHttpError extends Error {
   readonly status: number;
   readonly retryAfterSeconds: number | null;
@@ -223,7 +228,7 @@ export class RealDebridClient {
   }
 
   async enumerateProviderFiles(
-    sources: Array<{ magnetUri: string; partLabel: string | null }>,
+    sources: ProviderSource[],
   ): Promise<CachedProviderFileRecord[]> {
     const temporaryTorrentIds = new Set<string>();
 
@@ -249,7 +254,7 @@ export class RealDebridClient {
           `provider-inventory: torrent ${addedTorrent.id} exposed ${info.files.length} provider file(s).`,
           "verbose",
         );
-        const keyedFiles = withSelectionIds(info.files);
+        const keyedFiles = withSelectionIds(info.files, source);
         for (const candidate of keyedFiles) {
           files.push({
             providerFileId: candidate.selectionId,
@@ -285,7 +290,7 @@ export class RealDebridClient {
   }
 
   async startExactZipAcquisition(
-    sources: Array<{ magnetUri: string; partLabel: string | null }>,
+    sources: ProviderSource[],
     exactPath: string,
   ): Promise<ExactZipAcquisition> {
     const normalizedExactPath = normalizeProviderPath(exactPath);
@@ -308,7 +313,7 @@ export class RealDebridClient {
 
       try {
         const info = await this.readTorrentInfoWithRetry(addedTorrent.id);
-        const keyedFiles = withSelectionIds(info.files);
+        const keyedFiles = withSelectionIds(info.files, source);
         const match = keyedFiles.find(
           (candidate) =>
             normalizeProviderPath(candidate.file.path) === normalizedExactPath,
@@ -373,7 +378,7 @@ export class RealDebridClient {
   }
 
   async findExactZipMatch(
-    sources: Array<{ magnetUri: string; partLabel: string | null }>,
+    sources: ProviderSource[],
     exactPath: string,
   ): Promise<CachedProviderFileRecord> {
     this.log(
@@ -446,6 +451,14 @@ export class RealDebridClient {
     };
   }
 
+  async releaseAcquisition(marker: CachedProviderResumeMarker) {
+    this.log(
+      `archive-cleanup: deleting provider torrent ${marker.torrentId}.`,
+      "verbose",
+    );
+    await this.deleteTorrent(marker.torrentId);
+  }
+
   private async startSelection(
     locator: CachedProviderLocator,
   ): Promise<CachedProviderResumeMarker> {
@@ -459,7 +472,10 @@ export class RealDebridClient {
     );
     this.log(`archive-selection: magnet added as torrent ${addedTorrent.id}.`, "verbose");
     const info = await this.readTorrentInfoWithRetry(addedTorrent.id);
-    const keyedFiles = withSelectionIds(info.files);
+    const keyedFiles = withSelectionIds(info.files, {
+      magnetUri: locator.sourceMagnetUri,
+      partLabel: locator.partLabel,
+    });
     const selectedSelectionIds = [...locator.providerFileIds].sort();
     const selectedFiles = keyedFiles.filter(
       (candidate) => selectedSelectionIds.includes(candidate.selectionId),
@@ -691,7 +707,10 @@ export class RealDebridClient {
   }
 }
 
-function withSelectionIds(files: TorrentFileDto[]): ProviderSelectionCandidate[] {
+function withSelectionIds(
+  files: TorrentFileDto[],
+  source: ProviderSource,
+): ProviderSelectionCandidate[] {
   const occurrences = new Map<string, number>();
   return files.map((file) => {
     const normalizedPath = normalizeProviderPath(file.path);
@@ -701,6 +720,7 @@ function withSelectionIds(files: TorrentFileDto[]): ProviderSelectionCandidate[]
     return {
       file,
       selectionId: providerSelectionId(
+        source,
         normalizedPath,
         file.bytes ?? null,
         occurrenceIndex,
@@ -710,11 +730,14 @@ function withSelectionIds(files: TorrentFileDto[]): ProviderSelectionCandidate[]
 }
 
 function providerSelectionId(
+  source: ProviderSource,
   normalizedPath: string,
   sizeBytes: number | null,
   occurrenceIndex: number,
 ): string {
   const seed = [
+    source.magnetUri,
+    source.partLabel ?? "",
     normalizedPath,
     sizeBytes === null ? "unknown" : String(sizeBytes),
     String(occurrenceIndex),
