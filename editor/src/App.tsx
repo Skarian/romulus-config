@@ -12,7 +12,7 @@ import {
 } from "@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge";
 import { reorderWithEdge } from "@atlaskit/pragmatic-drag-and-drop-hitbox/util/reorder-with-edge";
 
-import initialSimulatorState from "virtual:romulus-simulator-state";
+import initialEditorState from "virtual:romulus-editor-state";
 
 import {
   formatArchiveSampleExtensions,
@@ -50,7 +50,7 @@ import type {
     PreviewFixture,
     PreviewFixtureSample,
     SessionSourceReference,
-    SimulatorState,
+    EditorState,
     SourceDocumentSavePreparationResult,
     SourceFilesRequest,
     SourceFilesState,
@@ -74,9 +74,9 @@ type SourceRowDragData = {
 };
 
 function App() {
-  const [state, setState] = useState<SimulatorState>(initialSimulatorState);
+  const [state, setState] = useState<EditorState>(initialEditorState);
   const [sessionEditableState, setSessionEditableState] = useState<EditableDocumentState | null>(
-    initialSimulatorState.status === "editable" ? initialSimulatorState.editable : null,
+    initialEditorState.status === "editable" ? initialEditorState.editable : null,
   );
   const [selectedSourceRef, setSelectedSourceRef] = useState<SessionSourceReference | null>(null);
   const [selectedSourceFiles, setSelectedSourceFiles] = useState<SourceFilesState | null>(null);
@@ -317,7 +317,7 @@ function App() {
 
   useEffect(() => {
     void refreshState();
-    const eventSource = new EventSource("/__simulator/events");
+    const eventSource = new EventSource("/__editor/events");
     eventSource.addEventListener("state", () => {
       void refreshState();
     });
@@ -384,11 +384,11 @@ function App() {
 
   async function refreshState() {
     try {
-      const response = await fetch("/__simulator/state");
+      const response = await fetch("/__editor/state");
       if (!response.ok) {
         return null;
       }
-      const nextState = (await response.json()) as SimulatorState;
+      const nextState = (await response.json()) as EditorState;
       setState(nextState);
       return nextState;
     } catch {
@@ -396,7 +396,7 @@ function App() {
     }
   }
 
-  function applyReloadedState(nextState: SimulatorState) {
+  function applyReloadedState(nextState: EditorState) {
     setState(nextState);
     setSessionEditableState(nextState.status === "editable" ? nextState.editable : null);
     setSelectedSourceRef(null);
@@ -429,7 +429,7 @@ function App() {
   }
 
   async function loadSourceFiles(request: SourceFilesRequest) {
-    const response = await fetch("/__simulator/source-files", {
+    const response = await fetch("/__editor/source-files", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -450,7 +450,7 @@ function App() {
 
   function buildHydrationRequestPayload(
     mode: HydrationMode,
-    snapshot: SimulatorState,
+    snapshot: EditorState,
   ) {
     return mode === "all"
       ? {
@@ -466,7 +466,7 @@ function App() {
   async function requestHydrationJob(entryIds: string[], forceRefresh: boolean) {
     setHydrationRequestError(null);
     try {
-      const response = await fetch("/__simulator/hydrate", {
+      const response = await fetch("/__editor/hydrate", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -495,7 +495,7 @@ function App() {
 
   async function requestHydration(
     mode: HydrationMode,
-    snapshot: SimulatorState = state,
+    snapshot: EditorState = state,
   ) {
     const { entryIds, forceRefresh } = buildHydrationRequestPayload(mode, snapshot);
     return requestHydrationJob(entryIds, forceRefresh);
@@ -523,7 +523,7 @@ function App() {
     );
     setPreviewRequestError(null);
     try {
-      const response = await fetch("/__simulator/preview-fixtures", {
+      const response = await fetch("/__editor/preview-fixtures", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -587,7 +587,7 @@ function App() {
       requestKey,
     );
 
-    const response = await fetch("/__simulator/archive-sample-extensions", {
+    const response = await fetch("/__editor/archive-sample-extensions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -679,7 +679,7 @@ function App() {
     );
 
     try {
-      const response = await fetch("/__simulator/selected-files", {
+      const response = await fetch("/__editor/selected-files", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -803,7 +803,7 @@ function App() {
     setSavingSourceDocument(true);
     pendingLocalConfigUpdateCountRef.current = 1;
     try {
-      const response = await fetch("/__simulator/save-document", {
+      const response = await fetch("/__editor/save-document", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -845,7 +845,7 @@ function App() {
       if (refreshModeAfterSave) {
         if (!nextState) {
           setHydrationRequestError(
-            "Changes were saved, but the simulator could not refresh its current state. Open Update Database and try again.",
+            "Changes were saved, but the editor could not refresh its current state. Open Update Database and try again.",
           );
           setShowHydrationModal(true);
         } else {
@@ -879,7 +879,7 @@ function App() {
     setClearDatabaseSelection(EMPTY_CLEAR_DATABASE_SELECTION);
 
     try {
-      const response = await fetch("/__simulator/clear-data", {
+      const response = await fetch("/__editor/clear-data", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -918,8 +918,8 @@ function App() {
     <main className="page-shell">
       <section className="hero">
         <div>
-          <p className="eyebrow">Romulus Config Simulator</p>
-          <h1>Romulus Config Simulator</h1>
+          <p className="eyebrow">Romulus Config Editor</p>
+          <h1>Romulus Config Editor</h1>
           <p className="hero-copy">
             This page reads <code>source.json</code> directly, checks that it is
             valid, and updates when the file changes. Use{" "}
@@ -1355,7 +1355,7 @@ function App() {
         >
           {!state.hydration.apiKeyConfigured ? (
             <p>
-              Add your <code>REAL_DEBRID_API_KEY</code> to <code>simulator/.env.local</code>
+              Add your <code>REAL_DEBRID_API_KEY</code> to <code>editor/.env.local</code>
               before loading file lists.
             </p>
           ) : (
@@ -2094,7 +2094,7 @@ function FilesPanel({
           title={retryableReadyState ? "This ZIP file is ready to retry" : "This ZIP file is still being prepared"}
           body={
             retryableReadyState
-              ? "The outer ZIP is already prepared, but the simulator could not finish reading it. Use Refresh to retry from the saved provider state."
+              ? "The outer ZIP is already prepared, but the editor could not finish reading it. Use Refresh to retry from the saved provider state."
               : `${sourceFiles.statusLabel ?? "Preparing"}${sourceFiles.progressPercent === null ? "" : ` (${sourceFiles.progressPercent}%)`}. Wait for the Real-Debrid download to finish, then use Refresh to continue.`
           }
         />
@@ -2327,7 +2327,7 @@ function SourcePolicyWorkbench({
             <div className="panel-scroll-body policy-body">
               <EmptyState
                 title="No unarchive controls yet"
-                body="Hydrate and open this source first so the simulator can inspect archive files."
+                body="Hydrate and open this source first so the editor can inspect archive files."
               />
             </div>
           ) : (
@@ -2567,7 +2567,7 @@ function SourcePolicyWorkbench({
           <div className="panel-scroll-body policy-body">
             <EmptyState
               title="No rename analysis yet"
-              body="Hydrate and open this source first so the simulator can inspect its observed file names."
+              body="Hydrate and open this source first so the editor can inspect its observed file names."
             />
           </div>
         ) : (
@@ -2816,7 +2816,7 @@ function SourcePolicyWorkbench({
             {!controller.sourceReady ? (
               <EmptyState
                 title="No statistics yet"
-                body="Hydrate and open this source first so the simulator can compute policy guidance from real cached file names."
+                body="Hydrate and open this source first so the editor can compute policy guidance from real cached file names."
               />
             ) : (
               <div className="field-stack">

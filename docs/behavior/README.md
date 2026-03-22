@@ -1,6 +1,6 @@
 # Behavior Docs
 
-This folder captures repo-local behavior specs for the config editor and simulator.
+This folder captures repo-local behavior specs for the config editor and editor.
 
 These docs are intended to stabilize product behavior before the active ExecPlan is revised or executed.
 

@@ -14,14 +14,14 @@ This draft records the top-level app structure and shared shell behavior around 
    - the source-list page
    - an individual source editor
 2. If loading or reloading `source.json` produces a blocked-document state, the app stays on the source-list page and renders a blocked variant of that page instead of introducing a third top-level page.
-3. The app keeps a shared top header consistent with the current simulator.
-4. That top header keeps the small-caps label plus the `Romulus Config Simulator` title.
+3. The app keeps a shared top header consistent with the current editor.
+4. That top header keeps the small-caps label plus the `Romulus Config Editor` title.
 5. The top-right side of that header shows a compact inline config-validity indicator using `Config valid` or `Config invalid`.
 6. In blocked-document state, the shared header remains visible while the source-list body is replaced by the blocking recovery panel defined in [`status-and-conflicts.md`](status-and-conflicts.md).
 7. The manual `Reload source.json` control is available only on the source-list page, including the blocked-document variant of that page.
 8. App-wide database refresh and clear-database actions are available only on the source-list page while the current document is editable, and they are grouped under `Manage database`.
 9. If `source.json` changes on disk externally while the app is open, the app-wide reload prompt may appear over either the source-list page or an individual source editor.
-10. Individual source editors provide a dedicated back button for returning to the source-list page, matching the current simulator pattern.
+10. Individual source editors provide a dedicated back button for returning to the source-list page, matching the current editor pattern.
 
 ## Failure Behavior
 

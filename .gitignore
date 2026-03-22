@@ -1,7 +1,7 @@
 .agent
 .agents
 AGENTS.md
-simulator/node_modules
-simulator/dist
-simulator/.local
-simulator/.env.local
+editor/node_modules
+editor/dist
+editor/.local
+editor/.env.local

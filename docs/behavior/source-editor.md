@@ -16,7 +16,7 @@ This draft records editor-session behavior. Shared persistence and conflict rule
 3. Individual source editors do not expose their own `source.json` save or apply action; persisting draft changes into `source.json` happens only from the source-list page.
 4. Individual source editors may still expose auxiliary local-state save flows, such as `Sample File Extensions`, when those flows do not write `source.json`.
 5. While an individual source editor is open, its `source.json` draft state remains local until the user leaves that editor and saves from the source-list page.
-6. The individual source editor page keeps the current simulator-style section order:
+6. The individual source editor page keeps the current editor-style section order:
    - `Source Info` at the top
    - a two-column row with `Files List` and `Download Folder Preview`
    - `Unarchive` below that when relevant
@@ -87,7 +87,7 @@ This draft records editor-session behavior. Shared persistence and conflict rule
    - `All phrases`
    - `Selected phrases`
    - `Custom`
-63. The `Ignore` section keeps the current simulator pattern of a simple list of glob-pattern input rows with add and remove controls.
+63. The `Ignore` section keeps the current editor pattern of a simple list of glob-pattern input rows with add and remove controls.
 64. The editor supports raw ignore-glob editing as long as each glob is schema/runtime-valid.
 65. The first ignore-glob input shows example placeholder text so maintainers can quickly see the expected glob shape.
 66. Blank ignore-glob rows are allowed temporarily while the maintainer is editing the current draft.
@@ -116,7 +116,7 @@ This draft records editor-session behavior. Shared persistence and conflict rule
 1. Closing the app, reloading the app, or confirming a manual reload from disk clears live-session undo history instead of attempting to restore saved history from disk.
 2. Unsaved editor changes must not silently persist into `source.json` before the source-list save action succeeds.
 3. Individual source editors must not expose their own `source.json` save or apply action.
-4. Individual source editors must not drift from the confirmed simulator-style section order for the current scope.
+4. Individual source editors must not drift from the confirmed editor-style section order for the current scope.
 5. `Source Info` must not become editable inside the individual source editor for the current scope.
 6. The `Unarchive` section must not be shown for sources where archive extraction is not relevant.
 7. Dedicated-folder rename controls must not be shown unless `Dedicated Folder` is the selected unarchive layout.

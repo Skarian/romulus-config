@@ -4,28 +4,28 @@ import { fileURLToPath } from "node:url";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
-import { SimulatorBackend, ensureLocalArtifacts } from "./src/server/backend";
+import { EditorBackend, ensureLocalArtifacts } from "./src/server/backend";
 import type { NormalizedScope, SourceFilesRequest } from "./src/types";
 
-const VIRTUAL_ID = "virtual:romulus-simulator-state";
+const VIRTUAL_ID = "virtual:romulus-editor-state";
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`;
-const simulatorRoot = fileURLToPath(new URL(".", import.meta.url));
+const editorRoot = fileURLToPath(new URL(".", import.meta.url));
 
-function simulatorStatePlugin(): Plugin {
+function editorStatePlugin(): Plugin {
   let repoRoot = "";
   let sourcePath = "";
   let schemaPath = "";
-  let backend: SimulatorBackend;
+  let backend: EditorBackend;
 
   return {
-    name: "romulus-simulator-state",
+    name: "romulus-editor-state",
     configResolved(config) {
       repoRoot = path.resolve(config.root, "..");
       sourcePath = path.join(repoRoot, "source.json");
       schemaPath = path.join(repoRoot, "references/romulus/docs/schema.json");
       ensureLocalArtifacts(repoRoot);
       const env = loadEnv(config.mode, config.root, "");
-      backend = new SimulatorBackend(repoRoot, env.REAL_DEBRID_API_KEY ?? "");
+      backend = new EditorBackend(repoRoot, env.REAL_DEBRID_API_KEY ?? "");
     },
     resolveId(id) {
       return id === VIRTUAL_ID ? RESOLVED_VIRTUAL_ID : null;
@@ -40,11 +40,11 @@ function simulatorStatePlugin(): Plugin {
     },
     configureServer(server) {
       server.watcher.add([sourcePath, schemaPath]);
-      server.middlewares.use("/__simulator/state", (_request, response) => {
+      server.middlewares.use("/__editor/state", (_request, response) => {
         response.setHeader("Content-Type", "application/json");
         response.end(JSON.stringify(backend.buildState()));
       });
-      server.middlewares.use("/__simulator/source-files", async (request, response) => {
+      server.middlewares.use("/__editor/source-files", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -74,7 +74,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/hydrate", async (request, response) => {
+      server.middlewares.use("/__editor/hydrate", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -104,7 +104,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/preview-fixtures", async (request, response) => {
+      server.middlewares.use("/__editor/preview-fixtures", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -163,7 +163,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/archive-sample-extensions", async (request, response) => {
+      server.middlewares.use("/__editor/archive-sample-extensions", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -212,7 +212,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/selected-files", async (request, response) => {
+      server.middlewares.use("/__editor/selected-files", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -253,7 +253,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/save-document", async (request, response) => {
+      server.middlewares.use("/__editor/save-document", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -296,7 +296,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/clear-data", async (request, response) => {
+      server.middlewares.use("/__editor/clear-data", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -344,7 +344,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/events", (_request, response) => {
+      server.middlewares.use("/__editor/events", (_request, response) => {
         response.setHeader("Content-Type", "text/event-stream");
         response.setHeader("Cache-Control", "no-cache");
         response.setHeader("Connection", "keep-alive");
@@ -375,8 +375,8 @@ function simulatorStatePlugin(): Plugin {
 }
 
 export default defineConfig({
-  root: simulatorRoot,
-  plugins: [react(), simulatorStatePlugin()],
+  root: editorRoot,
+  plugins: [react(), editorStatePlugin()],
   server: {
     open: false,
   },

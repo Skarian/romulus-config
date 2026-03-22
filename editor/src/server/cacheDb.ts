@@ -130,7 +130,7 @@ type SelectedFileStateRecord = {
   updated_at: string;
 };
 
-export class SimulatorCacheDb {
+export class EditorCacheDb {
   private readonly database: Database.Database;
 
   constructor(dbPath: string) {

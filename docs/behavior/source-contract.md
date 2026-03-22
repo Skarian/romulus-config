@@ -10,7 +10,7 @@ This draft records the editor-facing `source.json` contract for the convenience 
 
 ## Expected Result
 
-1. The editor targets the real `source.json` contract rather than a simulator-only document shape.
+1. The editor targets the real `source.json` contract rather than a editor-only document shape.
 2. When loading or reloading `source.json`, the editor treats the document as either editable or blocked according to [`status-and-conflicts.md`](status-and-conflicts.md).
 3. Blocked-document state is reserved for only three blocker families:
    - `Invalid source.json`

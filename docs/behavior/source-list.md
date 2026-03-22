@@ -92,7 +92,7 @@ This draft records source-list behavior for the convenience editor's entry page 
    - secondary action: `Cancel`
 56. In editable document state, the source-list page exposes app-wide database maintenance through `Manage database`.
 57. `Manage database` contains `Refresh Database`, `View Logs`, and `Clear Database`.
-58. Triggering `Refresh Database` follows the current simulator pattern: open an `Update Database` modal, then start the update from within that modal.
+58. Triggering `Refresh Database` follows the current editor pattern: open an `Update Database` modal, then start the update from within that modal.
 59. The `Update Database` modal includes two radio options for refresh scope:
    - `Only Load Missing Cache`
    - `Refresh All Cache`
@@ -100,7 +100,7 @@ This draft records source-list behavior for the convenience editor's entry page 
 61. `Refresh All Cache` uses helper copy `Rebuilds file cache for every source, even when local cache already exists.`
 62. `Only Load Missing Cache` is selected by default when the `Update Database` modal opens.
 63. If `Only Load Missing Cache` is selected when no sources are currently missing cache, `Start Update` stays disabled and hover text says `No Missing Cache`.
-64. If refresh credentials are missing, `Start Update` stays disabled and the modal shows inline setup instructions naming `REAL_DEBRID_API_KEY` in `simulator/.env.local`.
+64. If refresh credentials are missing, `Start Update` stays disabled and the modal shows inline setup instructions naming `REAL_DEBRID_API_KEY` in `editor/.env.local`.
 65. `Refresh All Cache` overwrites cache for every source regardless of whether that source currently has no-cache warnings, stale saved selections, or stale saved preview data.
 66. `Refresh All Cache` does not proactively clear saved selections or saved preview data before the run.
 67. After `Refresh All Cache`, the app reuses compatible saved selections and saved preview data where possible and falls back to the existing reconciliation rules when refreshed inventory makes some saved state invalid.
@@ -109,7 +109,7 @@ This draft records source-list behavior for the convenience editor's entry page 
 70. After that transition, the maintainer may close `View Logs` while the refresh continues in the background.
 71. While `Refresh Database` is running, the source-list shell remains visible but normal source-list interactions stay locked.
 72. While `Refresh Database` is running or after logs exist, the `Manage database` dropdown keeps `View Logs` available.
-73. `View Logs` opens the current simulator-style log modal for the database update run.
+73. `View Logs` opens the current editor-style log modal for the database update run.
 74. `View Logs` keeps both `Simple` and `Detailed` log filters.
 75. Triggering `Clear Database` opens an options modal before any data is removed.
 76. That modal uses the approved shell copy:

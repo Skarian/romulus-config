@@ -158,7 +158,7 @@ Behavior:
 - applied after scope filtering in standard mode
 - applied to internal file names in archive-selection mode
 
-For known simulator-specific glob gaps, see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)
+For known editor-specific glob gaps, see [KNOWN_ISSUES.md](../KNOWN_ISSUES.md)
 
 ## `rename`
 

@@ -12,7 +12,7 @@ import {
   createReadyStandardCacheRow,
   type CachedProviderFileRecord,
 } from "./cacheDb";
-import { ensureLocalArtifacts, SimulatorBackend } from "./backend";
+import { ensureLocalArtifacts, EditorBackend } from "./backend";
 import { RealDebridClient } from "./realDebrid";
 
 const FIXTURE_REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
@@ -50,7 +50,7 @@ test("selected file state stays isolated per entry even when standard sources sh
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
+    const backend = new EditorBackend(repoRoot, "");
     const [firstEntry, secondEntry] = backend.buildState().entries;
     assert.ok(firstEntry);
     assert.ok(secondEntry);
@@ -134,7 +134,7 @@ test("runHydration processes shared standard cache keys only once", async () => 
       ];
     };
 
-    const backend = new SimulatorBackend(repoRoot, "token");
+    const backend = new EditorBackend(repoRoot, "token");
 
     await backend.runHydration();
 
@@ -180,7 +180,7 @@ test("runHydration resumes a preparing archive when force refresh is not request
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "token");
+    const backend = new EditorBackend(repoRoot, "token");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 
@@ -258,7 +258,7 @@ test("runHydration keeps a links-ready archive retryable when post-download hand
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "token");
+    const backend = new EditorBackend(repoRoot, "token");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 
@@ -335,7 +335,7 @@ test("runHydration persists the latest update logs and run summary across backen
       return [providerFile("Logged.zip")];
     };
 
-    let backend = new SimulatorBackend(repoRoot, "token");
+    let backend = new EditorBackend(repoRoot, "token");
     await backend.runHydration();
 
     let state = backend.buildState();
@@ -345,7 +345,7 @@ test("runHydration persists the latest update logs and run summary across backen
     assert.equal(state.hydration.lastRun?.successCount, 1);
     assert.equal(state.hydration.lastRun?.failureCount, 0);
 
-    backend = new SimulatorBackend(repoRoot, "token");
+    backend = new EditorBackend(repoRoot, "token");
     state = backend.buildState();
     assert.equal(state.hydration.logs.length > 0, true);
     assert.equal(state.hydration.lastRun?.outcome, "success");
@@ -387,7 +387,7 @@ test("runHydration with force refresh preserves prior cache for sources that fai
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "token");
+    const backend = new EditorBackend(repoRoot, "token");
     const [cachedEntry, failingEntry] = backend.buildState().entries;
     assert.ok(cachedEntry);
     assert.ok(failingEntry);
@@ -459,7 +459,7 @@ test("selected file state survives entry reorder and presentation renames", () =
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
+    const backend = new EditorBackend(repoRoot, "");
     const entries = backend.buildState().entries;
     const targetEntry = entries.find((entry) => entry.subfolder === "target");
     assert.ok(targetEntry);
@@ -547,7 +547,7 @@ test("selected file state falls back from legacy entry ids into the scoped key",
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
+    const backend = new EditorBackend(repoRoot, "");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 
@@ -617,7 +617,7 @@ test("getSourceFiles keeps analysis names from the scoped raw inventory before i
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
+    const backend = new EditorBackend(repoRoot, "");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 
@@ -671,7 +671,7 @@ test("getSourceFiles reports how many cached files are excluded by the current s
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
+    const backend = new EditorBackend(repoRoot, "");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 
@@ -724,7 +724,7 @@ test("archive sample extensions persist across structural changes that keep the 
       ],
     });
 
-    let backend = new SimulatorBackend(repoRoot, "");
+    let backend = new EditorBackend(repoRoot, "");
     const [firstEntry] = backend.buildState().entries;
     assert.ok(firstEntry);
 
@@ -756,7 +756,7 @@ test("archive sample extensions persist across structural changes that keep the 
       ],
     });
 
-    backend = new SimulatorBackend(repoRoot, "");
+    backend = new EditorBackend(repoRoot, "");
     const [renamedEntry] = backend.buildState().entries;
     assert.ok(renamedEntry);
 
@@ -795,7 +795,7 @@ test("archive sample extensions do not carry across scope-only standard path cha
       ],
     });
 
-    let backend = new SimulatorBackend(repoRoot, "");
+    let backend = new EditorBackend(repoRoot, "");
     const [firstEntry] = backend.buildState().entries;
     assert.ok(firstEntry);
 
@@ -827,7 +827,7 @@ test("archive sample extensions do not carry across scope-only standard path cha
       ],
     });
 
-    backend = new SimulatorBackend(repoRoot, "");
+    backend = new EditorBackend(repoRoot, "");
     const [movedEntry] = backend.buildState().entries;
     assert.ok(movedEntry);
     assert.equal(movedEntry.hydrationKey, firstEntry.hydrationKey);
@@ -871,7 +871,7 @@ test("clearLocalData removes only the selected local database categories", async
       return [providerFile("Alpha.zip")];
     };
 
-    const backend = new SimulatorBackend(repoRoot, "token");
+    const backend = new EditorBackend(repoRoot, "token");
     const [entry] = backend.buildState().entries;
     assert.ok(entry);
 

@@ -1,18 +1,18 @@
 import path from "node:path";
 
 import { loadSourceDocument } from "./sourceDocument";
-import type { HydrationState, HydrationSourceState, SimulatorState } from "./types";
+import type { HydrationState, HydrationSourceState, EditorState } from "./types";
 
-export function buildSimulatorState(
+export function buildEditorState(
   repoRoot: string,
   hydrationInput?: Partial<HydrationState>,
-): SimulatorState {
-  const cachePath = path.join(repoRoot, "simulator/.local");
+): EditorState {
+  const cachePath = path.join(repoRoot, "editor/.local");
   const generatedAt = new Date().toISOString();
   const notes = [
     "Config changes are watched directly from source.json.",
-    "File lists are loaded locally through the simulator dev server.",
-    `The local simulator database lives under ${cachePath}.`,
+    "File lists are loaded locally through the editor dev server.",
+    `The local editor database lives under ${cachePath}.`,
   ];
   const baseHydration: HydrationState = {
     lastHydratedAt: null,

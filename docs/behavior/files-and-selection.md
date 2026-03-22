@@ -38,7 +38,7 @@ This draft records file-row and selection behavior. Persistence details for the 
 22. The `Files List` loading state uses the body `Checking the local database for this source.`
 23. The `Files List` reflects the current draft scope, ignore, and selected-file state while continuing to show original file names.
 24. If current valid ignore rules hide previously selected file rows, those hidden rows are removed from the saved selection state rather than preserved off-screen.
-25. When the source loaded successfully but scope and ignore rules filtered everything out, the `Files List` empty state keeps the current simulator copy:
+25. When the source loaded successfully but scope and ignore rules filtered everything out, the `Files List` empty state keeps the current editor copy:
    - title: `No files matched this source`
    - body: `The source loaded successfully, but your scope and ignore rules filtered everything out.`
 26. Because source-list entry is gated on file cache, the `Files List` does not expose a separate in-editor no-cache empty state in the current editor scope.
@@ -80,7 +80,7 @@ This draft records file-row and selection behavior. Persistence details for the 
 19. The `Files List` loading state must not keep the older `Loading saved file list` wording for the current scope.
 20. The `Files List` loading state must not drift from the approved loading body copy for the current scope.
 21. The `Files List` must not fall back to saved-disk file visibility or saved-disk selections when the current draft differs.
-22. The filtered-empty `Files List` state must not drift from the approved current-simulator copy for the current scope.
+22. The filtered-empty `Files List` state must not drift from the approved current-editor copy for the current scope.
 23. The `Files List` must not introduce a separate in-editor no-cache empty state for the current scope.
 24. The `Files List` load-failure state must not drift from the approved copy and retry label for the current scope.
 25. The `Files List` must not show draft rename-output hints for the current scope.

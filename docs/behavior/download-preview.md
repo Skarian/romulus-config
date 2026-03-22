@@ -43,7 +43,7 @@ This draft records download-folder preview behavior. Persistence details for pre
 29. If no saved `Sample File Extensions` value exists, the prompt opens with a blank input.
 30. The preview remains usable by showing inferred default sample entries derived from the current `Sample File Extensions` policy.
 31. The `Download Folder Preview` shows the current draft output names rather than the original source-file names.
-32. The `Download Folder Preview` keeps the current simulator tree-style folder preview layout.
+32. The `Download Folder Preview` keeps the current editor tree-style folder preview layout.
 33. Search and filtering controls stay limited to the `Files List` and do not extend into the `Download Folder Preview`.
 34. The `Download Folder Preview` updates live from the current draft rename, ignore, unarchive, and selection state.
 35. If saved preview data is explicitly cleared while file cache remains available, affected sources still open normally, the saved `Sample File Extensions` policy is removed, and any required `Sample File Extensions` are prompted again when preview needs them.
@@ -79,7 +79,7 @@ This draft records download-folder preview behavior. Persistence details for pre
 27. `Edit Sample File Extensions` must not fail to prefill the saved value when one exists.
 28. `Edit Sample File Extensions` must not inject a synthetic default value when none is saved.
 29. The `Download Folder Preview` must not fall back to showing original file names when the current draft output names differ.
-30. The `Download Folder Preview` must not drift from the current simulator tree-style layout for the current scope.
+30. The `Download Folder Preview` must not drift from the current editor tree-style layout for the current scope.
 31. The `Download Folder Preview` must not introduce its own search or filtering control for the current scope.
 32. The `Download Folder Preview` must not lag behind or ignore the current draft rename, ignore, unarchive, or selection state.
 33. The editor must not treat cleared preview data as if file-cache availability was also lost.

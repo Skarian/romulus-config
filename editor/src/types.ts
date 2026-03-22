@@ -318,7 +318,7 @@ export type SourceFilesState = {
   files: SourceFileRow[];
 };
 
-type SimulatorStateBase = {
+type EditorStateBase = {
   generatedAt: string;
   configPath: string;
   schemaPath: string;
@@ -328,14 +328,14 @@ type SimulatorStateBase = {
   hydration: HydrationState;
 };
 
-export type SimulatorState =
-  | (SimulatorStateBase & {
+export type EditorState =
+  | (EditorStateBase & {
       status: "blocked";
       blocked: BlockedDocumentState;
       editable: null;
       entries: PreviewEntry[];
     })
-  | (SimulatorStateBase & {
+  | (EditorStateBase & {
       status: "editable";
       blocked: null;
       editable: EditableDocumentState;

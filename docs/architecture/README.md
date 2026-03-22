@@ -2,7 +2,7 @@
 
 This folder captures the target architecture for the convenience editor as a standalone system.
 
-These docs are meant to stay useful even after the current simulator implementation is replaced or removed.
+These docs are meant to stay useful even after the current editor implementation is replaced or removed.
 
 ## How These Docs Differ
 
@@ -10,7 +10,7 @@ These docs are meant to stay useful even after the current simulator implementat
 2. `docs/architecture/` defines which layer owns that behavior, which invariants must hold, and how data moves.
 3. ExecPlans define how a specific implementation effort will move the codebase toward this architecture.
 
-Architecture docs should not become UX copy specs, implementation tickets, or simulator-history notes.
+Architecture docs should not become UX copy specs, implementation tickets, or editor-history notes.
 
 ## Writing Style
 

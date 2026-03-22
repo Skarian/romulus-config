@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { normalizeArchiveSampleExtensions } from "../archiveSamplePolicy";
 import { buildPreviewEntries } from "../runtimeValidation";
-import { buildSimulatorState } from "../simulatorState";
+import { buildEditorState } from "../editorState";
 import {
   commitSourceDocumentSavePreview,
   getSourceDocumentPaths,
@@ -19,7 +19,7 @@ import type {
   PreviewFixtureSample,
     HydrationSourceState,
     PreviewEntry,
-    SimulatorState,
+    EditorState,
     SourceFilesRequest,
     SourceFilesState,
   } from "../types";
@@ -30,7 +30,7 @@ import {
   createReadyStandardCacheRow,
   isArchivePayload,
   isReadyStandardPayload,
-  SimulatorCacheDb,
+  EditorCacheDb,
   type CachedProviderFileRecord,
   type SourceCacheRow,
 } from "./cacheDb";
@@ -63,8 +63,8 @@ class RetryableArchiveHydrationError extends Error {
   }
 }
 
-export class SimulatorBackend {
-  private readonly cacheDb: SimulatorCacheDb;
+export class EditorBackend {
+  private readonly cacheDb: EditorCacheDb;
   private readonly subscribers = new Set<BackendSubscriber>();
   private hydrationRunning = false;
   private currentRunId: number | null = null;
@@ -74,14 +74,14 @@ export class SimulatorBackend {
     private readonly repoRoot: string,
     private readonly apiKey: string,
   ) {
-    this.cacheDb = new SimulatorCacheDb(
-      path.join(repoRoot, "simulator/.local/cache.db"),
+    this.cacheDb = new EditorCacheDb(
+      path.join(repoRoot, "editor/.local/cache.db"),
     );
   }
 
-  buildState(): SimulatorState {
+  buildState(): EditorState {
     const latestRunId = this.currentRunId ?? this.cacheDb.getLatestHydrationRunId();
-    const baseState = buildSimulatorState(this.repoRoot, {
+    const baseState = buildEditorState(this.repoRoot, {
       running: this.hydrationRunning,
       apiKeyConfigured: this.apiKey.trim().length > 0,
       logs: this.cacheDb.listHydrationLogs(latestRunId),
@@ -293,7 +293,7 @@ export class SimulatorBackend {
       throw new Error("Config must be editable before the database can be updated");
     }
     if (this.apiKey.trim().length === 0) {
-      throw new Error("REAL_DEBRID_API_KEY is missing in simulator/.env.local");
+      throw new Error("REAL_DEBRID_API_KEY is missing in editor/.env.local");
     }
 
     const entries = uniqueEntriesByHydrationKey(state.entries.filter(
@@ -627,7 +627,7 @@ export class SimulatorBackend {
     }
 
     const label = level.toUpperCase();
-    console.log(`[simulator:${label}] ${normalizedMessage}`);
+    console.log(`[editor:${label}] ${normalizedMessage}`);
   }
 
   private publishState() {
@@ -659,7 +659,7 @@ function normalizeLogMessage(message: string) {
 }
 
 export function ensureLocalArtifacts(repoRoot: string) {
-  fs.mkdirSync(path.join(repoRoot, "simulator/.local"), { recursive: true });
+  fs.mkdirSync(path.join(repoRoot, "editor/.local"), { recursive: true });
 }
 
 export function previewFixtureKey(

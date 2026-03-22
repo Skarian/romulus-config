@@ -11,12 +11,12 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { buildSimulatorState } from "./simulatorState";
+import { buildEditorState } from "./editorState";
 import type { SourceDocument } from "./types";
 
 const FIXTURE_REPO_ROOT = fileURLToPath(new URL("../../", import.meta.url));
 
-test("buildSimulatorState returns blocked shell state when the document is blocked", () => {
+test("buildEditorState returns blocked shell state when the document is blocked", () => {
   const repoRoot = createTempRepo();
   try {
     writeSourceDocument(repoRoot, {
@@ -49,7 +49,7 @@ test("buildSimulatorState returns blocked shell state when the document is block
       ],
     });
 
-    const state = buildSimulatorState(repoRoot);
+    const state = buildEditorState(repoRoot);
 
     assert.equal(state.status, "blocked");
     assert.equal(state.entries.length, 0);
@@ -63,7 +63,7 @@ test("buildSimulatorState returns blocked shell state when the document is block
   }
 });
 
-test("buildSimulatorState returns editable shell state with repairable validation and missing hydration", () => {
+test("buildEditorState returns editable shell state with repairable validation and missing hydration", () => {
   const repoRoot = createTempRepo();
   try {
     writeSourceDocument(repoRoot, {
@@ -84,7 +84,7 @@ test("buildSimulatorState returns editable shell state with repairable validatio
       ],
     });
 
-    const state = buildSimulatorState(repoRoot);
+    const state = buildEditorState(repoRoot);
 
     assert.equal(state.status, "editable");
     assert.equal(state.entries.length, 1);
@@ -100,7 +100,7 @@ test("buildSimulatorState returns editable shell state with repairable validatio
 });
 
 function createTempRepo() {
-  const repoRoot = mkdtempSync(path.join(tmpdir(), "romulus-simulator-state-"));
+  const repoRoot = mkdtempSync(path.join(tmpdir(), "romulus-editor-state-"));
   const schemaTargetDirectory = path.join(repoRoot, "references/romulus/docs");
   mkdirSync(schemaTargetDirectory, { recursive: true });
   writeFileSync(

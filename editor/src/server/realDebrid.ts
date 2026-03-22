@@ -212,7 +212,7 @@ export class RealDebridClient {
       REAL_DEBRID_INTER_REQUEST_DELAY_MS,
       (delayMs, usedFallbackDelay, retryAttempt) => {
         this.log(
-          `Real-Debrid rate limited the simulator; retry ${retryAttempt} will wait ${formatDuration(delayMs)}${usedFallbackDelay ? " (fallback cooldown)." : "."}`,
+          `Real-Debrid rate limited the editor; retry ${retryAttempt} will wait ${formatDuration(delayMs)}${usedFallbackDelay ? " (fallback cooldown)." : "."}`,
           "basic",
         );
       },
