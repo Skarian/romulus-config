@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   beginEntryRequest,
+  buildSourceFilesRequest,
   buildPhraseOptions,
   isLatestEntryRequest,
   matchSourceFilesToEntry,
@@ -15,32 +16,64 @@ import {
 import type { SourceFilesState } from "./types";
 
 test("matchSourceFilesToEntry drops stale source file payloads from other entries", () => {
-  const sourceFiles = createSourceFilesState("entry-a");
+  const sourceFiles = createSourceFilesState("hydration-a", "selection-a");
 
-  assert.equal(matchSourceFilesToEntry("entry-b", sourceFiles), null);
-  assert.equal(matchSourceFilesToEntry("entry-a", sourceFiles), sourceFiles);
+  assert.equal(
+    matchSourceFilesToEntry(
+      {
+        hydrationKey: "hydration-b",
+        selectionStateKey: "selection-b",
+      },
+      sourceFiles,
+    ),
+    null,
+  );
+  assert.equal(
+    matchSourceFilesToEntry(
+      {
+        hydrationKey: "hydration-a",
+        selectionStateKey: "selection-a",
+      },
+      sourceFiles,
+    ),
+    sourceFiles,
+  );
 });
 
 test("updateSourceFilesForEntry ignores responses for a different entry", () => {
-  const sourceFiles = createSourceFilesState("entry-a");
+  const sourceFiles = createSourceFilesState("hydration-a", "selection-a");
 
   assert.equal(
-    updateSourceFilesForEntry(sourceFiles, "entry-b", (current) => ({
-      ...current,
-      selectedRowIds: ["row-1"],
-    })),
+    updateSourceFilesForEntry(
+      sourceFiles,
+      {
+        hydrationKey: "hydration-b",
+        selectionStateKey: "selection-b",
+      },
+      (current) => ({
+        ...current,
+        selectedRowIds: ["row-1"],
+      }),
+    ),
     sourceFiles,
   );
 });
 
 test("updateSourceFilesForEntry applies updates for the active entry", () => {
-  const sourceFiles = createSourceFilesState("entry-a");
+  const sourceFiles = createSourceFilesState("hydration-a", "selection-a");
 
   assert.deepEqual(
-    updateSourceFilesForEntry(sourceFiles, "entry-a", (current) => ({
-      ...current,
-      selectedRowIds: ["row-1"],
-    })),
+    updateSourceFilesForEntry(
+      sourceFiles,
+      {
+        hydrationKey: "hydration-a",
+        selectionStateKey: "selection-a",
+      },
+      (current) => ({
+        ...current,
+        selectedRowIds: ["row-1"],
+      }),
+    ),
     {
       ...sourceFiles,
       selectedRowIds: ["row-1"],
@@ -181,6 +214,33 @@ test("buildPhraseOptions sorts observed phrases by descending file count", () =>
   ]);
 });
 
+test("buildSourceFilesRequest keeps only valid ignore globs", () => {
+  assert.deepEqual(
+    buildSourceFilesRequest({
+      id: "entry-a",
+      hydrationKey: "hydration-a",
+      selectionStateKey: "selection-a",
+      scope: {
+        normalizedPath: "/roms/",
+        includeNestedFiles: false,
+        isArchiveSelection: false,
+      },
+      ignoreGlobs: ["*.tmp", "["],
+    }),
+    {
+      hydrationKey: "hydration-a",
+      selectionStateKey: "selection-a",
+      legacyEntryId: "entry-a",
+      scope: {
+        normalizedPath: "/roms/",
+        includeNestedFiles: false,
+        isArchiveSelection: false,
+      },
+      ignoreGlobs: ["*.tmp"],
+    },
+  );
+});
+
 function pendingSave(
   entryId: string,
   sections: {
@@ -194,9 +254,14 @@ function pendingSave(
   };
 }
 
-function createSourceFilesState(entryId: string): SourceFilesState {
+function createSourceFilesState(
+  hydrationKey: string,
+  selectionStateKey: string,
+): SourceFilesState {
   return {
-    entryId,
+    hydrationKey,
+    selectionStateKey,
+    entryId: null,
     sourceStatus: "ready",
     sourceMode: "standard",
     updatedAt: null,

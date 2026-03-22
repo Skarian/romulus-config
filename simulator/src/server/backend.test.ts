@@ -5,7 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { buildManagedRenameRule } from "../policyAnalysis";
+import { buildSourceFilesRequest } from "../sourcePolicyEditor";
+import type { PreviewEntry, SourceFilesRequest } from "../types";
 import {
   createPreparingArchiveCacheRow,
   createReadyStandardCacheRow,
@@ -15,336 +16,6 @@ import { ensureLocalArtifacts, SimulatorBackend } from "./backend";
 import { RealDebridClient } from "./realDebrid";
 
 const FIXTURE_REPO_ROOT = fileURLToPath(new URL("../../../", import.meta.url));
-
-test("updateSourceEntryPolicy rewrites only the selected source entry", () => {
-  const repoRoot = createTempRepo();
-  try {
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Nintendo Entertainment System",
-          subfolder: "nes",
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:AAA",
-            },
-          ],
-        },
-        {
-          displayName: "Super Nintendo Entertainment System",
-          subfolder: "snes",
-          ignore: {
-            glob: ["*.txt"],
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:BBB",
-            },
-          ],
-        },
-      ],
-    });
-
-    const backend = new SimulatorBackend(repoRoot, "");
-    const [nesEntry] = backend.buildState().entries;
-    assert.ok(nesEntry);
-
-    const cacheDb = (backend as unknown as {
-      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
-    }).cacheDb;
-    cacheDb.setSourceCache(
-      createReadyStandardCacheRow(nesEntry.hydrationKey, [
-        providerFile("Super Mario Bros. (World).zip"),
-        providerFile("Airwolf (USA) (Acclaim).zip"),
-      ]),
-    );
-
-    const result = backend.updateSourceEntryPolicy({
-      ...policyTarget(nesEntry),
-      renamePolicy: {
-        mode: "phrases",
-        phrases: ["(USA)", "(World)"],
-      },
-      ignoreGlobs: ["* (Japan)*.zip"],
-    });
-
-    assert.deepEqual(result, { status: "ok" });
-
-    const updatedDocument = JSON.parse(
-      readFileSync(path.join(repoRoot, "source.json"), "utf8"),
-    ) as {
-      version: number;
-      entries: Array<Record<string, unknown>>;
-    };
-    const expectedRenameRule = buildManagedRenameRule(
-      "phrases",
-      ["(USA)", "(World)"],
-      ["(Acclaim)", "(USA)", "(World)"],
-    );
-    assert.ok(expectedRenameRule);
-
-    assert.deepEqual(updatedDocument.entries[0], {
-      displayName: "Nintendo Entertainment System",
-      subfolder: "nes",
-      rename: expectedRenameRule,
-      ignore: {
-        glob: ["* (Japan)*.zip"],
-      },
-      torrents: [
-        {
-          url: "magnet:?xt=urn:btih:AAA",
-        },
-      ],
-    });
-    assert.deepEqual(updatedDocument.entries[1], {
-      displayName: "Super Nintendo Entertainment System",
-      subfolder: "snes",
-      ignore: {
-        glob: ["*.txt"],
-      },
-      torrents: [
-        {
-          url: "magnet:?xt=urn:btih:BBB",
-        },
-      ],
-    });
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("updateSourceEntryPolicy requires confirmation before replacing a custom rename regex", () => {
-  const repoRoot = createTempRepo();
-  try {
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Nintendo Entertainment System",
-          subfolder: "nes",
-          rename: {
-            pattern: "^(.+?) \\(USA\\)(\\.[^.]+)$",
-            replacement: "$1$2",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:AAA",
-            },
-          ],
-        },
-      ],
-    });
-
-    const backend = new SimulatorBackend(repoRoot, "");
-    const [entry] = backend.buildState().entries;
-    assert.ok(entry);
-
-    const cacheDb = (backend as unknown as {
-      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
-    }).cacheDb;
-    cacheDb.setSourceCache(
-      createReadyStandardCacheRow(entry.hydrationKey, [
-        providerFile("Airwolf (USA) (Acclaim).zip"),
-      ]),
-    );
-
-    const result = backend.updateSourceEntryPolicy({
-      ...policyTarget(entry),
-      renamePolicy: {
-        mode: "all",
-        phrases: ["(USA)", "(Acclaim)"],
-      },
-    });
-
-    assert.deepEqual(result, {
-      status: "needs-confirmation",
-      kind: "custom-rename",
-      error:
-        "This source already has a custom rename regex. Confirm replacement before overwriting it.",
-    });
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("updateSourceEntryPolicy targets the selected entry even when standard sources share a hydration key", () => {
-  const repoRoot = createTempRepo();
-  try {
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Source One",
-          subfolder: "one",
-          scope: {
-            path: "/set-one/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:SHARED",
-            },
-          ],
-        },
-        {
-          displayName: "Source Two",
-          subfolder: "two",
-          scope: {
-            path: "/set-two/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:SHARED",
-            },
-          ],
-        },
-      ],
-    });
-
-    const backend = new SimulatorBackend(repoRoot, "");
-    const entries = backend.buildState().entries;
-    assert.equal(entries.length, 2);
-    assert.equal(entries[0]?.hydrationKey, entries[1]?.hydrationKey);
-    const targetEntry = entries[1];
-    assert.ok(targetEntry);
-
-    const cacheDb = (backend as unknown as {
-      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
-    }).cacheDb;
-    cacheDb.setSourceCache(
-      createReadyStandardCacheRow(targetEntry.hydrationKey, [
-        providerFile("set-one/Alpha (USA).zip", "/set-one/Alpha (USA).zip"),
-        providerFile("set-two/Bravo (USA).zip", "/set-two/Bravo (USA).zip"),
-      ]),
-    );
-
-    const result = backend.updateSourceEntryPolicy({
-      ...policyTarget(targetEntry),
-      renamePolicy: {
-        mode: "phrases",
-        phrases: ["(USA)"],
-      },
-    });
-
-    assert.deepEqual(result, { status: "ok" });
-
-    const updatedDocument = JSON.parse(
-      readFileSync(path.join(repoRoot, "source.json"), "utf8"),
-    ) as {
-      entries: Array<Record<string, unknown>>;
-    };
-
-    assert.equal(updatedDocument.entries[0]?.rename, undefined);
-    assert.deepEqual(updatedDocument.entries[1]?.rename, {
-      pattern: "(?:[\\s.]*(?:\\(USA\\))(?:\\s*(?:\\(USA\\)))*(?:([\\s]+)(?=\\b\\B)|(?:[\\s.]*(?=\\.[^.]+$))))",
-      replacement: "$1",
-    });
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("updateSourceEntryPolicy re-resolves the selected entry after source order changes", () => {
-  const repoRoot = createTempRepo();
-  try {
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Source One",
-          subfolder: "one",
-          scope: {
-            path: "/set-one/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:SHARED",
-            },
-          ],
-        },
-        {
-          displayName: "Source Two",
-          subfolder: "two",
-          scope: {
-            path: "/set-two/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:AAA",
-            },
-          ],
-        },
-      ],
-    });
-
-    const backend = new SimulatorBackend(repoRoot, "");
-    const targetEntry = backend.buildState().entries.find((entry) => entry.subfolder === "two");
-    assert.ok(targetEntry);
-
-    const cacheDb = (backend as unknown as {
-      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
-    }).cacheDb;
-    cacheDb.setSourceCache(
-      createReadyStandardCacheRow(targetEntry.hydrationKey, [
-        providerFile("set-two/Bravo (USA).zip", "/set-two/Bravo (USA).zip"),
-      ]),
-    );
-
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Source Two",
-          subfolder: "two",
-          scope: {
-            path: "/set-two/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:AAA",
-            },
-          ],
-        },
-        {
-          displayName: "Source One",
-          subfolder: "one",
-          scope: {
-            path: "/set-one/",
-          },
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:SHARED",
-            },
-          ],
-        },
-      ],
-    });
-
-    const result = backend.updateSourceEntryPolicy({
-      ...policyTarget(targetEntry),
-      renamePolicy: {
-        mode: "phrases",
-        phrases: ["(USA)"],
-      },
-    });
-
-    assert.deepEqual(result, { status: "ok" });
-
-    const updatedDocument = JSON.parse(
-      readFileSync(path.join(repoRoot, "source.json"), "utf8"),
-    ) as {
-      entries: Array<Record<string, unknown>>;
-    };
-
-    assert.deepEqual(updatedDocument.entries[0]?.rename, {
-      pattern: "(?:[\\s.]*(?:\\(USA\\))(?:\\s*(?:\\(USA\\)))*(?:([\\s]+)(?=\\b\\B)|(?:[\\s.]*(?=\\.[^.]+$))))",
-      replacement: "$1",
-    });
-    assert.equal(updatedDocument.entries[1]?.rename, undefined);
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
 
 test("selected file state stays isolated per entry even when standard sources share a hydration key", () => {
   const repoRoot = createTempRepo();
@@ -395,16 +66,25 @@ test("selected file state stays isolated per entry even when standard sources sh
       ]),
     );
 
-    const [firstFile] = backend.getSourceFiles(firstEntry.id).files;
-    const [secondFile] = backend.getSourceFiles(secondEntry.id).files;
+    const [firstFile] = backend.getSourceFiles(sourceFilesRequest(firstEntry)).files;
+    const [secondFile] = backend.getSourceFiles(sourceFilesRequest(secondEntry)).files;
     assert.ok(firstFile);
     assert.ok(secondFile);
 
-    assert.deepEqual(backend.setSelectedRowIds(firstEntry.id, [firstFile.id]), [firstFile.id]);
-    assert.deepEqual(backend.setSelectedRowIds(secondEntry.id, [secondFile.id]), [secondFile.id]);
+    assert.deepEqual(
+      backend.setSelectedRowIds(sourceFilesRequest(firstEntry), [firstFile.id]),
+      [firstFile.id],
+    );
+    assert.deepEqual(
+      backend.setSelectedRowIds(sourceFilesRequest(secondEntry), [secondFile.id]),
+      [secondFile.id],
+    );
 
-    assert.deepEqual(backend.getSourceFiles(firstEntry.id).selectedRowIds, [firstFile.id]);
-    assert.deepEqual(backend.getSourceFiles(secondEntry.id).selectedRowIds, [secondFile.id]);
+    assert.deepEqual(backend.getSourceFiles(sourceFilesRequest(firstEntry)).selectedRowIds, [firstFile.id]);
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(secondEntry)).selectedRowIds,
+      [secondFile.id],
+    );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -467,7 +147,7 @@ test("runHydration processes shared standard cache keys only once", async () => 
     assert.equal(state.hydration.sourceStates[firstEntry.id]?.status, "ready");
     assert.equal(state.hydration.sourceStates[secondEntry.id]?.status, "ready");
     assert.deepEqual(
-      backend.getSourceFiles(secondEntry.id).files.map((file) => file.originalName),
+      backend.getSourceFiles(sourceFilesRequest(secondEntry)).files.map((file) => file.originalName),
       ["Bravo.zip"],
     );
   } finally {
@@ -631,6 +311,121 @@ test("runHydration keeps a links-ready archive retryable when post-download hand
   }
 });
 
+test("runHydration persists the latest update logs and run summary across backend reloads", async () => {
+  const repoRoot = createTempRepo();
+  const originalEnumerateProviderFiles = RealDebridClient.prototype.enumerateProviderFiles;
+
+  try {
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Logged Source",
+          subfolder: "logged",
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    RealDebridClient.prototype.enumerateProviderFiles = async function () {
+      return [providerFile("Logged.zip")];
+    };
+
+    let backend = new SimulatorBackend(repoRoot, "token");
+    await backend.runHydration();
+
+    let state = backend.buildState();
+    assert.equal(state.hydration.logs.length > 0, true);
+    assert.equal(state.hydration.lastRun?.outcome, "success");
+    assert.equal(state.hydration.lastRun?.sourceCount, 1);
+    assert.equal(state.hydration.lastRun?.successCount, 1);
+    assert.equal(state.hydration.lastRun?.failureCount, 0);
+
+    backend = new SimulatorBackend(repoRoot, "token");
+    state = backend.buildState();
+    assert.equal(state.hydration.logs.length > 0, true);
+    assert.equal(state.hydration.lastRun?.outcome, "success");
+    assert.equal(state.hydration.lastRun?.sourceCount, 1);
+    assert.equal(state.hydration.lastRun?.successCount, 1);
+    assert.equal(state.hydration.lastRun?.failureCount, 0);
+  } finally {
+    RealDebridClient.prototype.enumerateProviderFiles = originalEnumerateProviderFiles;
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("runHydration with force refresh preserves prior cache for sources that fail", async () => {
+  const repoRoot = createTempRepo();
+  const originalEnumerateProviderFiles = RealDebridClient.prototype.enumerateProviderFiles;
+
+  try {
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Cached Source",
+          subfolder: "cached",
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+        {
+          displayName: "Failing Source",
+          subfolder: "failing",
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:BBB",
+            },
+          ],
+        },
+      ],
+    });
+
+    const backend = new SimulatorBackend(repoRoot, "token");
+    const [cachedEntry, failingEntry] = backend.buildState().entries;
+    assert.ok(cachedEntry);
+    assert.ok(failingEntry);
+
+    const cacheDb = (backend as unknown as {
+      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
+    }).cacheDb;
+    cacheDb.setSourceCache(
+      createReadyStandardCacheRow(cachedEntry.hydrationKey, [providerFile("Old-Cached.zip")]),
+    );
+    cacheDb.setSourceCache(
+      createReadyStandardCacheRow(failingEntry.hydrationKey, [providerFile("Old-Failing.zip")]),
+    );
+
+    RealDebridClient.prototype.enumerateProviderFiles = async function (sources) {
+      if (sources[0]?.magnetUri === "magnet:?xt=urn:btih:AAA") {
+        return [providerFile("Fresh-Cached.zip")];
+      }
+      throw new Error("provider request failed");
+    };
+
+    await backend.runHydration(undefined, { forceRefresh: true });
+
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(cachedEntry)).files.map((file) => file.originalName),
+      ["Fresh-Cached.zip"],
+    );
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(failingEntry)).files.map((file) => file.originalName),
+      ["Old-Failing.zip"],
+    );
+    assert.equal(backend.buildState().hydration.lastRun?.outcome, "mixed");
+  } finally {
+    RealDebridClient.prototype.enumerateProviderFiles = originalEnumerateProviderFiles;
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
 test("selected file state survives entry reorder and presentation renames", () => {
   const repoRoot = createTempRepo();
   try {
@@ -679,9 +474,12 @@ test("selected file state survives entry reorder and presentation renames", () =
       ]),
     );
 
-    const [targetFile] = backend.getSourceFiles(targetEntry.id).files;
+    const [targetFile] = backend.getSourceFiles(sourceFilesRequest(targetEntry)).files;
     assert.ok(targetFile);
-    assert.deepEqual(backend.setSelectedRowIds(targetEntry.id, [targetFile.id]), [targetFile.id]);
+    assert.deepEqual(
+      backend.setSelectedRowIds(sourceFilesRequest(targetEntry), [targetFile.id]),
+      [targetFile.id],
+    );
 
     writeSourceDocument(repoRoot, {
       version: 1,
@@ -719,7 +517,10 @@ test("selected file state survives entry reorder and presentation renames", () =
     assert.ok(reorderedEntry);
     assert.notEqual(reorderedEntry.id, targetEntry.id);
     assert.equal(reorderedEntry.selectionStateKey, targetEntry.selectionStateKey);
-    assert.deepEqual(backend.getSourceFiles(reorderedEntry.id).selectedRowIds, [targetFile.id]);
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(reorderedEntry)).selectedRowIds,
+      [targetFile.id],
+    );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
   }
@@ -777,7 +578,7 @@ test("selected file state falls back from legacy entry ids into the scoped key",
       `)
       .run(entry.id, JSON.stringify(["Alpha.zip"]), new Date().toISOString());
 
-    assert.deepEqual(backend.getSourceFiles(entry.id).selectedRowIds, ["Alpha.zip"]);
+    assert.deepEqual(backend.getSourceFiles(sourceFilesRequest(entry)).selectedRowIds, ["Alpha.zip"]);
 
     const migratedRow = cacheDb.database
       .prepare(`
@@ -789,52 +590,6 @@ test("selected file state falls back from legacy entry ids into the scoped key",
     assert.deepEqual(
       migratedRow ? JSON.parse(migratedRow.selected_row_ids_json) : null,
       ["Alpha.zip"],
-    );
-  } finally {
-    rmSync(repoRoot, { recursive: true, force: true });
-  }
-});
-
-test("updateSourceEntryPolicy rejects malformed payloads", () => {
-  const repoRoot = createTempRepo();
-  try {
-    writeSourceDocument(repoRoot, {
-      version: 1,
-      entries: [
-        {
-          displayName: "Nintendo Entertainment System",
-          subfolder: "nes",
-          torrents: [
-            {
-              url: "magnet:?xt=urn:btih:AAA",
-            },
-          ],
-        },
-      ],
-    });
-
-    const backend = new SimulatorBackend(repoRoot, "");
-    const [entry] = backend.buildState().entries;
-    assert.ok(entry);
-
-    const cacheDb = (backend as unknown as {
-      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
-    }).cacheDb;
-    cacheDb.setSourceCache(
-      createReadyStandardCacheRow(entry.hydrationKey, [providerFile("Alpha (USA).zip")]),
-    );
-
-    assert.throws(
-      () =>
-        backend.updateSourceEntryPolicy({
-          ...policyTarget(entry),
-          renamePolicy: {
-            mode: "bogus" as "none",
-            phrases: ["(USA)"],
-          },
-          confirmReplaceCustomRename: "yes" as unknown as boolean,
-        }),
-      /Invalid source entry policy payload/,
     );
   } finally {
     rmSync(repoRoot, { recursive: true, force: true });
@@ -876,7 +631,7 @@ test("getSourceFiles keeps analysis names from the scoped raw inventory before i
       ]),
     );
 
-    const sourceFiles = backend.getSourceFiles(entry.id);
+    const sourceFiles = backend.getSourceFiles(sourceFilesRequest(entry));
 
     assert.deepEqual(
       sourceFiles.analysisOriginalNames,
@@ -895,29 +650,66 @@ test("getSourceFiles keeps analysis names from the scoped raw inventory before i
   }
 });
 
-test("archive sample extensions persist by hydration key across equivalent sources", () => {
+test("getSourceFiles reports how many cached files are excluded by the current scope", () => {
   const repoRoot = createTempRepo();
   try {
     writeSourceDocument(repoRoot, {
       version: 1,
       entries: [
         {
-          displayName: "Sony PlayStation A",
-          subfolder: "psx",
-          unarchive: {
-            layout: {
-              mode: "flat",
-            },
+          displayName: "Scoped Source",
+          subfolder: "scoped",
+          scope: {
+            path: "/roms/",
           },
           torrents: [
             {
-              url: "magnet:?xt=urn:btih:AAA",
+              url: "magnet:?xt=urn:btih:SCOPE",
             },
           ],
         },
+      ],
+    });
+
+    const backend = new SimulatorBackend(repoRoot, "");
+    const [entry] = backend.buildState().entries;
+    assert.ok(entry);
+
+    const cacheDb = (backend as unknown as {
+      cacheDb: { setSourceCache: (row: ReturnType<typeof createReadyStandardCacheRow>) => void };
+    }).cacheDb;
+    cacheDb.setSourceCache(
+      createReadyStandardCacheRow(entry.hydrationKey, [
+        providerFile("Alpha.zip", "/roms/Alpha.zip"),
+        providerFile("Bravo.zip", "/roms/sub/Bravo.zip"),
+        providerFile("Charlie.zip", "/other/Charlie.zip"),
+      ]),
+    );
+
+    const sourceFiles = backend.getSourceFiles(sourceFilesRequest(entry));
+
+    assert.equal(sourceFiles.scopedOutFileCount, 2);
+    assert.deepEqual(
+      sourceFiles.analysisFiles?.map((file) => file.originalName),
+      ["Alpha.zip"],
+    );
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("archive sample extensions persist across structural changes that keep the content boundary", () => {
+  const repoRoot = createTempRepo();
+  try {
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
         {
-          displayName: "Sony PlayStation B",
-          subfolder: "psx-alt",
+          displayName: "Sony PlayStation",
+          subfolder: "psx",
+          scope: {
+            path: "/disc-a/",
+          },
           unarchive: {
             layout: {
               mode: "flat",
@@ -932,19 +724,190 @@ test("archive sample extensions persist by hydration key across equivalent sourc
       ],
     });
 
-    const backend = new SimulatorBackend(repoRoot, "");
-    const [firstEntry, secondEntry] = backend.buildState().entries;
+    let backend = new SimulatorBackend(repoRoot, "");
+    const [firstEntry] = backend.buildState().entries;
     assert.ok(firstEntry);
-    assert.ok(secondEntry);
-    assert.equal(firstEntry.hydrationKey, secondEntry.hydrationKey);
 
-    backend.setArchiveSampleExtensions(firstEntry.id, ["cue", ".bin", ".cue"]);
+    backend.setArchiveSampleExtensions(
+      archiveSampleExtensionsRequest(firstEntry),
+      ["cue", ".bin", ".cue"],
+    );
+
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Sony PlayStation Renamed",
+          subfolder: "psx-renamed",
+          scope: {
+            path: "/disc-a/",
+          },
+          unarchive: {
+            layout: {
+              mode: "flat",
+            },
+          },
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    backend = new SimulatorBackend(repoRoot, "");
+    const [renamedEntry] = backend.buildState().entries;
+    assert.ok(renamedEntry);
 
     assert.deepEqual(
-      backend.getSourceFiles(secondEntry.id).archiveSampleExtensions,
+      backend.getSourceFiles(sourceFilesRequest(renamedEntry)).archiveSampleExtensions,
       [".cue", ".bin"],
     );
   } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("archive sample extensions do not carry across scope-only standard path changes", () => {
+  const repoRoot = createTempRepo();
+  try {
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Sony PlayStation",
+          subfolder: "psx",
+          scope: {
+            path: "/disc-a/",
+          },
+          unarchive: {
+            layout: {
+              mode: "flat",
+            },
+          },
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    let backend = new SimulatorBackend(repoRoot, "");
+    const [firstEntry] = backend.buildState().entries;
+    assert.ok(firstEntry);
+
+    backend.setArchiveSampleExtensions(
+      archiveSampleExtensionsRequest(firstEntry),
+      [".cue", ".bin"],
+    );
+
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Sony PlayStation",
+          subfolder: "psx",
+          scope: {
+            path: "/disc-b/",
+          },
+          unarchive: {
+            layout: {
+              mode: "flat",
+            },
+          },
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    backend = new SimulatorBackend(repoRoot, "");
+    const [movedEntry] = backend.buildState().entries;
+    assert.ok(movedEntry);
+    assert.equal(movedEntry.hydrationKey, firstEntry.hydrationKey);
+    assert.notEqual(movedEntry.selectionStateKey, firstEntry.selectionStateKey);
+
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(movedEntry)).archiveSampleExtensions,
+      [],
+    );
+  } finally {
+    rmSync(repoRoot, { recursive: true, force: true });
+  }
+});
+
+test("clearLocalData removes only the selected local database categories", async () => {
+  const repoRoot = createTempRepo();
+  const originalEnumerateProviderFiles = RealDebridClient.prototype.enumerateProviderFiles;
+
+  try {
+    writeSourceDocument(repoRoot, {
+      version: 1,
+      entries: [
+        {
+          displayName: "Clearable Source",
+          subfolder: "clearable",
+          unarchive: {
+            layout: {
+              mode: "flat",
+            },
+          },
+          torrents: [
+            {
+              url: "magnet:?xt=urn:btih:AAA",
+            },
+          ],
+        },
+      ],
+    });
+
+    RealDebridClient.prototype.enumerateProviderFiles = async function () {
+      return [providerFile("Alpha.zip")];
+    };
+
+    const backend = new SimulatorBackend(repoRoot, "token");
+    const [entry] = backend.buildState().entries;
+    assert.ok(entry);
+
+    await backend.runHydration();
+
+    const [file] = backend.getSourceFiles(sourceFilesRequest(entry)).files;
+    assert.ok(file);
+    backend.setSelectedRowIds(sourceFilesRequest(entry), [file.id]);
+    backend.setArchiveSampleExtensions(archiveSampleExtensionsRequest(entry), [".cue"]);
+
+    backend.clearLocalData({
+      fileCache: false,
+      savedSelections: true,
+      savedPreviewData: false,
+      updateLogs: true,
+    });
+
+    assert.deepEqual(backend.getSourceFiles(sourceFilesRequest(entry)).selectedRowIds, []);
+    assert.deepEqual(
+      backend.getSourceFiles(sourceFilesRequest(entry)).archiveSampleExtensions,
+      [".cue"],
+    );
+    assert.equal(backend.buildState().hydration.logs.length, 0);
+    assert.equal(backend.buildState().hydration.missingSourceIds.includes(entry.id), false);
+
+    backend.clearLocalData({
+      fileCache: true,
+      savedSelections: false,
+      savedPreviewData: true,
+      updateLogs: false,
+    });
+
+    assert.equal(backend.buildState().hydration.missingSourceIds.includes(entry.id), true);
+    assert.deepEqual(backend.getSourceFiles(sourceFilesRequest(entry)).archiveSampleExtensions, []);
+  } finally {
+    RealDebridClient.prototype.enumerateProviderFiles = originalEnumerateProviderFiles;
     rmSync(repoRoot, { recursive: true, force: true });
   }
 });
@@ -959,6 +922,17 @@ function createTempRepo() {
     "utf8",
   );
   return repoRoot;
+}
+
+function sourceFilesRequest(entry: PreviewEntry): SourceFilesRequest {
+  return buildSourceFilesRequest(entry);
+}
+
+function archiveSampleExtensionsRequest(entry: PreviewEntry) {
+  return {
+    selectionStateKey: entry.selectionStateKey,
+    unarchiveEnabled: entry.unarchive !== null,
+  };
 }
 
 function writeSourceDocument(
@@ -993,19 +967,5 @@ function providerFile(
       path: pathValue,
       partLabel: null,
     },
-  };
-}
-
-function policyTarget(entry: {
-  id: string;
-  selectionStateKey: string;
-  displayName: string;
-  subfolder: string;
-}) {
-  return {
-    entryId: entry.id,
-    selectionStateKey: entry.selectionStateKey,
-    displayName: entry.displayName,
-    subfolder: entry.subfolder,
   };
 }

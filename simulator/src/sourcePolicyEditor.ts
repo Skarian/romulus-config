@@ -1,5 +1,11 @@
+import { isValidIgnoreRule } from "./ignoreRules";
 import type { ParentheticalPhraseStat } from "./policyAnalysis";
-import type { HydrationSourceStatus, SourceFilesState } from "./types";
+import type {
+  HydrationSourceStatus,
+  PreviewEntry,
+  SourceFilesRequest,
+  SourceFilesState,
+} from "./types";
 
 export type ManagedRenameDraftMode = "none" | "all" | "phrases";
 
@@ -26,11 +32,28 @@ export type PhraseOption = {
   observed: boolean;
 };
 
+export function buildSourceFilesRequest(
+  entry: Pick<PreviewEntry, "id" | "hydrationKey" | "selectionStateKey" | "scope" | "ignoreGlobs">,
+): SourceFilesRequest {
+  return {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
+    legacyEntryId: entry.id,
+    scope: entry.scope,
+    ignoreGlobs: entry.ignoreGlobs.filter((glob) => isValidIgnoreRule(glob)),
+  };
+}
+
 export function matchSourceFilesToEntry(
-  entryId: string | null,
+  entry: Pick<PreviewEntry, "hydrationKey" | "selectionStateKey"> | null,
   sourceFiles: SourceFilesState | null,
 ) {
-  if (!entryId || !sourceFiles || sourceFiles.entryId !== entryId) {
+  if (
+    !entry ||
+    !sourceFiles ||
+    sourceFiles.hydrationKey !== entry.hydrationKey ||
+    sourceFiles.selectionStateKey !== entry.selectionStateKey
+  ) {
     return null;
   }
 
@@ -39,10 +62,14 @@ export function matchSourceFilesToEntry(
 
 export function updateSourceFilesForEntry(
   sourceFiles: SourceFilesState | null,
-  entryId: string,
+  entry: Pick<PreviewEntry, "hydrationKey" | "selectionStateKey">,
   applyUpdate: (current: SourceFilesState) => SourceFilesState,
 ) {
-  if (!sourceFiles || sourceFiles.entryId !== entryId) {
+  if (
+    !sourceFiles ||
+    sourceFiles.hydrationKey !== entry.hydrationKey ||
+    sourceFiles.selectionStateKey !== entry.selectionStateKey
+  ) {
     return sourceFiles;
   }
 

@@ -22,6 +22,9 @@ export function isValidIgnoreRule(pattern: string) {
   if (normalizedPattern.length === 0) {
     return false;
   }
+  if (!hasBalancedCharacterClasses(normalizedPattern)) {
+    return false;
+  }
 
   try {
     return makeRe(normalizedPattern, MATCH_OPTIONS) !== false;
@@ -36,4 +39,26 @@ function normalizeIgnorePattern(pattern: string) {
 
 function normalizeIgnoreCandidate(filename: string) {
   return filename.toLowerCase();
+}
+
+function hasBalancedCharacterClasses(pattern: string) {
+  let insideCharacterClass = false;
+
+  for (const character of pattern) {
+    if (character === "[") {
+      if (insideCharacterClass) {
+        return false;
+      }
+      insideCharacterClass = true;
+      continue;
+    }
+    if (character === "]") {
+      if (!insideCharacterClass) {
+        return false;
+      }
+      insideCharacterClass = false;
+    }
+  }
+
+  return !insideCharacterClass;
 }

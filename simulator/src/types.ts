@@ -40,6 +40,7 @@ export type SourceEntryDocument = {
 };
 
 export type SourceDocument = {
+  $schema?: string;
   version: number;
   entries: SourceEntryDocument[];
 };
@@ -49,6 +50,19 @@ export type NormalizedScope = {
   includeNestedFiles: boolean;
   isArchiveSelection: boolean;
 };
+
+export type SourceContentBoundaryIdentity = {
+  normalizedPath: string;
+  normalizedTorrentUrls: string[];
+  key: string;
+};
+
+export type SourceHydrationIdentity = {
+  mode: "standard" | "archive";
+  key: string;
+};
+
+export type SessionSourceReference = string;
 
 export type PreviewEntry = {
   id: string;
@@ -61,11 +75,21 @@ export type PreviewEntry = {
   ignoreGlobs: string[];
   renameRule: RenameRule | null;
   unarchive: UnarchiveDocument | null;
+  identity: SourceContentBoundaryIdentity;
+  hydration: SourceHydrationIdentity;
   folderPreview: {
     directDownloadBase: string;
     archiveMode: "disabled" | "flat" | "dedicatedFolder";
     archiveModeSummary: string;
   };
+};
+
+export type SourceFilesRequest = {
+  hydrationKey: string;
+  selectionStateKey: string;
+  legacyEntryId?: string;
+  scope: NormalizedScope;
+  ignoreGlobs: string[];
 };
 
 export type HydrationLogLevel = "info" | "success" | "error";
@@ -77,6 +101,30 @@ export type HydrationLogEntry = {
   level: HydrationLogLevel;
   visibility: HydrationLogVisibility;
   message: string;
+};
+
+export type HydrationRunOutcome = "success" | "mixed" | "failed";
+
+export type HydrationRunSummary = {
+  runId: number;
+  startedAt: string;
+  finishedAt: string;
+  sourceCount: number;
+  successCount: number;
+  failureCount: number;
+  outcome: HydrationRunOutcome;
+  errorMessage: string | null;
+};
+
+export type ClearLocalDataSelection = {
+  fileCache: boolean;
+  savedSelections: boolean;
+  savedPreviewData: boolean;
+  updateLogs: boolean;
+};
+
+export type ClearLocalDataResult = {
+  cleared: ClearLocalDataSelection;
 };
 
 export type HydrationSourceStatus = "missing" | "ready" | "preparing" | "error";
@@ -93,6 +141,7 @@ export type HydrationSourceState = {
 
 export type HydrationState = {
   lastHydratedAt: string | null;
+  lastRun?: HydrationRunSummary | null;
   missingSourceIds: string[];
   running: boolean;
   apiKeyConfigured: boolean;
@@ -100,18 +149,128 @@ export type HydrationState = {
   sourceStates: Record<string, HydrationSourceState>;
 };
 
-export type ValidationIssue = {
-  kind:
-    | "json"
-    | "schema"
-    | "runtime-invalid-version"
-    | "runtime-invalid-subfolder"
-    | "runtime-invalid-path"
-    | "runtime-invalid-scope"
-    | "runtime-invalid-ignore-rule"
-    | "runtime-invalid-rename-rule";
+export type BlockedIssueFamily =
+  | "invalid-source-json"
+  | "unsupported-editor-features"
+  | "duplicate-sources";
+
+export type BlockedIssueHeading =
+  | "Invalid source.json"
+  | "Unsupported editor features"
+  | "Duplicate sources";
+
+export type BlockedDocumentIssueCode =
+  | "json-parse"
+  | "schema"
+  | "unsupported-version"
+  | "unsupported-include-nested-files"
+  | "unsupported-recursive-unarchive"
+  | "duplicate-source";
+
+export type BlockedDocumentIssue = {
+  family: BlockedIssueFamily;
+  heading: BlockedIssueHeading;
+  code: BlockedDocumentIssueCode;
   message: string;
 };
+
+export type BlockedIssueGroup = {
+  family: BlockedIssueFamily;
+  heading: BlockedIssueHeading;
+  issues: BlockedDocumentIssue[];
+};
+
+export type BlockedDocumentState = {
+  title: "Editor Unavailable";
+  body: "This editor cannot open the current source.json until the issues below are fixed. Edit source.json directly, then reload.";
+  groups: BlockedIssueGroup[];
+};
+
+export type RepairableValidationIssueCode =
+  | "invalid-ignore-rule"
+  | "invalid-rename-rule"
+  | "invalid-dedicated-folder-rename-rule";
+
+export type RepairableValidationIssue = {
+  code: RepairableValidationIssueCode;
+  sourceId: string;
+  sourceName: string;
+  fieldPath: "ignore.glob" | "rename" | "unarchive.layout.rename";
+  message: string;
+};
+
+export type SaveBlocker = {
+  code:
+    | "schema"
+    | "unsupported-version"
+    | "unsupported-editor-feature"
+    | "duplicate-source"
+    | "repairable-validation";
+  message: string;
+  sourceId?: string;
+  sourceName?: string;
+};
+
+export type SaveReadiness =
+  | {
+      status: "ready";
+      blockers: [];
+    }
+  | {
+      status: "blocked";
+      blockers: SaveBlocker[];
+    };
+
+export type RepairableValidationSnapshot = {
+  issues: RepairableValidationIssue[];
+  issuesBySourceId: Record<string, RepairableValidationIssue[]>;
+  saveReadiness: SaveReadiness;
+};
+
+export type EditableDocumentState = {
+  sourceDocument: SourceDocument;
+  validation: RepairableValidationSnapshot;
+};
+
+export type SourceDocumentSavePreview = {
+  checksum: string;
+  document: SourceDocument;
+  text: string;
+};
+
+export type SourceDocumentSavePreparationResult =
+  | {
+      status: "ready";
+      preview: SourceDocumentSavePreview;
+      validation: RepairableValidationSnapshot;
+    }
+  | {
+      status: "blocked";
+      blockers: SaveBlocker[];
+      validation: RepairableValidationSnapshot;
+    };
+
+export type SourceDocumentLoadResultBase = {
+  configPath: string;
+  schemaPath: string;
+  diskFingerprint: string | null;
+};
+
+export type BlockedSourceDocumentLoadResult = SourceDocumentLoadResultBase & {
+  status: "blocked";
+  blocked: BlockedDocumentState;
+  entries: PreviewEntry[];
+};
+
+export type EditableSourceDocumentLoadResult = SourceDocumentLoadResultBase & {
+  status: "editable";
+  editable: EditableDocumentState;
+  entries: PreviewEntry[];
+};
+
+export type SourceDocumentLoadResult =
+  | BlockedSourceDocumentLoadResult
+  | EditableSourceDocumentLoadResult;
 
 export type SourceFileRow = {
   id: string;
@@ -140,7 +299,9 @@ export type PreviewFixture = {
 };
 
 export type SourceFilesState = {
-  entryId: string;
+  hydrationKey: string;
+  selectionStateKey: string;
+  entryId?: string | null;
   sourceStatus: HydrationSourceStatus;
   sourceMode: "standard" | "archive";
   updatedAt: string | null;
@@ -152,41 +313,31 @@ export type SourceFilesState = {
   previewFixtures: PreviewFixture[];
   analysisFiles?: SourceFileRow[];
   analysisOriginalNames?: string[];
+  scopedOutFileCount?: number;
   selectedRowIds?: string[];
   files: SourceFileRow[];
 };
 
+type SimulatorStateBase = {
+  generatedAt: string;
+  configPath: string;
+  schemaPath: string;
+  cachePath: string;
+  notes: string[];
+  diskFingerprint: string | null;
+  hydration: HydrationState;
+};
+
 export type SimulatorState =
-  | {
-      status: "missing";
-      generatedAt: string;
-      configPath: string;
-      schemaPath: string;
-      cachePath: string;
-      issues: ValidationIssue[];
+  | (SimulatorStateBase & {
+      status: "blocked";
+      blocked: BlockedDocumentState;
+      editable: null;
       entries: PreviewEntry[];
-      notes: string[];
-      hydration: HydrationState;
-    }
-  | {
-      status: "invalid";
-      generatedAt: string;
-      configPath: string;
-      schemaPath: string;
-      cachePath: string;
-      issues: ValidationIssue[];
+    })
+  | (SimulatorStateBase & {
+      status: "editable";
+      blocked: null;
+      editable: EditableDocumentState;
       entries: PreviewEntry[];
-      notes: string[];
-      hydration: HydrationState;
-    }
-  | {
-      status: "accepted";
-      generatedAt: string;
-      configPath: string;
-      schemaPath: string;
-      cachePath: string;
-      issues: ValidationIssue[];
-      entries: PreviewEntry[];
-      notes: string[];
-      hydration: HydrationState;
-    };
+    });

@@ -9,6 +9,8 @@
     "test": "tsx --test \"src/**/*.test.ts\""
   },
   "dependencies": {
+    "@atlaskit/pragmatic-drag-and-drop": "^1.7.9",
+    "@atlaskit/pragmatic-drag-and-drop-hitbox": "^1.1.0",
     "@zip.js/zip.js": "^2.8.23",
     "ajv": "^8.17.1",
     "better-sqlite3": "^12.8.0",

@@ -8,7 +8,7 @@ import type {
 import { normalizeProviderPath } from "./realDebrid";
 
 export function buildStandardSourceFiles(
-  entry: PreviewEntry,
+  entry: Pick<PreviewEntry, "scope" | "ignoreGlobs">,
   files: CachedProviderFileRecord[],
 ): SourceFileRow[] {
   return filterIgnoredSourceFiles(
@@ -18,32 +18,33 @@ export function buildStandardSourceFiles(
 }
 
 export function buildScopedStandardSourceFiles(
-  entry: PreviewEntry,
+  entry: Pick<PreviewEntry, "scope">,
   files: CachedProviderFileRecord[],
 ): SourceFileRow[] {
-  return files
-    .filter((file) => matchesScope(entry, normalizeProviderPath(file.path)))
-    .map((file) => ({
-      id: file.providerFileId,
-      originalName: file.originalName,
-      relativePath: `/${normalizeProviderPath(file.path)}`,
-      sizeBytes: file.sizeBytes,
-      partLabel: file.partLabel,
-      isArchiveCandidate: isArchiveCandidate(file.originalName),
-      kind: "standard" as const,
-    }))
-    .sort((left, right) => left.originalName.localeCompare(right.originalName));
+  return sortSourceFilesByOriginalName(
+    files
+      .filter((file) => matchesScope(entry, normalizeProviderPath(file.path)))
+      .map((file) => ({
+        id: file.providerFileId,
+        originalName: file.originalName,
+        relativePath: `/${normalizeProviderPath(file.path)}`,
+        sizeBytes: file.sizeBytes,
+        partLabel: file.partLabel,
+        isArchiveCandidate: isArchiveCandidate(file.originalName),
+        kind: "standard" as const,
+      })),
+  );
 }
 
 export function listStandardSourceOriginalNames(
-  entry: PreviewEntry,
+  entry: Pick<PreviewEntry, "scope">,
   files: CachedProviderFileRecord[],
 ) {
   return buildScopedStandardSourceFiles(entry, files).map((file) => file.originalName);
 }
 
 export function buildArchiveSourceFiles(
-  entry: PreviewEntry,
+  entry: Pick<PreviewEntry, "ignoreGlobs">,
   files: CachedArchiveEntryDescriptor[],
 ): SourceFileRow[] {
   return filterIgnoredSourceFiles(
@@ -55,8 +56,8 @@ export function buildArchiveSourceFiles(
 export function buildScopedArchiveSourceFiles(
   files: CachedArchiveEntryDescriptor[],
 ): SourceFileRow[] {
-  return files
-    .map((file) => ({
+  return sortSourceFilesByOriginalName(
+    files.map((file) => ({
       id: archiveEntryId(file),
       originalName: basename(file.entryPath),
       relativePath: `/${file.entryPath}`,
@@ -64,8 +65,8 @@ export function buildScopedArchiveSourceFiles(
       partLabel: null,
       isArchiveCandidate: isArchiveCandidate(file.entryPath),
       kind: "archive" as const,
-    }))
-    .sort((left, right) => left.originalName.localeCompare(right.originalName));
+    })),
+  );
 }
 
 export function listArchiveSourceOriginalNames(
@@ -78,7 +79,7 @@ export function isArchiveCandidate(pathValue: string): boolean {
   return isSupportedArchiveName(pathValue);
 }
 
-function matchesScope(entry: PreviewEntry, normalizedPath: string): boolean {
+function matchesScope(entry: Pick<PreviewEntry, "scope">, normalizedPath: string): boolean {
   const scopePath = entry.scope.normalizedPath.replace(/^\/+/, "");
   if (entry.scope.normalizedPath === "/") {
     return entry.scope.includeNestedFiles || !normalizedPath.includes("/");
@@ -114,4 +115,21 @@ function archiveEntryId(entry: CachedArchiveEntryDescriptor): string {
 function filterIgnoredSourceFiles(sourceFiles: SourceFileRow[], ignoreGlobs: string[]) {
   const matcher = compileIgnoreMatcher(ignoreGlobs);
   return sourceFiles.filter((file) => !matcher(file.originalName));
+}
+
+function sortSourceFilesByOriginalName(sourceFiles: SourceFileRow[]) {
+  return sourceFiles
+    .map((file, index) => ({
+      file,
+      index,
+      normalizedName: file.originalName.toLowerCase(),
+    }))
+    .sort((left, right) => {
+      const nameComparison = left.normalizedName.localeCompare(right.normalizedName);
+      if (nameComparison !== 0) {
+        return nameComparison;
+      }
+      return left.index - right.index;
+    })
+    .map(({ file }) => file);
 }

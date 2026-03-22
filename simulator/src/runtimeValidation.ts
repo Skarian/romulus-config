@@ -1,14 +1,15 @@
-import { createHash } from "node:crypto";
-
 import type {
+  BlockedDocumentIssue,
   PreviewEntry,
+  RepairableValidationIssue,
+  RepairableValidationSnapshot,
   RenameRule,
   SourceDocument,
   SourceEntryDocument,
   SourceScopeDocument,
-  ValidationIssue,
 } from "./types";
 import { isValidIgnoreRule } from "./ignoreRules";
+import { hashHex } from "./stableHash";
 
 const ROOT_PATH = "/";
 const ZIP_SUFFIX = ".zip";
@@ -16,7 +17,15 @@ const ZIP_SUFFIX = ".zip";
 export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
   return document.entries.map((entry, index) => {
     const scope = normalizeScope(entry.scope) ?? defaultScope();
-    const hydrationKey = stableHydrationKey(entry, scope.normalizedPath);
+    const normalizedTorrentUrls = normalizeTorrentUrls(entry);
+    const contentBoundaryKey = stableContentBoundaryKey(
+      normalizedTorrentUrls,
+      scope.normalizedPath,
+    );
+    const hydrationKey = stableHydrationKey(
+      normalizedTorrentUrls,
+      scope.normalizedPath,
+    );
     const ignoreGlobs = (entry.ignore?.glob ?? [])
       .map((glob) => glob.trim())
       .filter((glob) => glob.length > 0);
@@ -31,7 +40,7 @@ export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
     return {
       id: stableEntryId(index, entry, scope.normalizedPath),
       hydrationKey,
-      selectionStateKey: stableSelectionStateKey(hydrationKey, scope),
+      selectionStateKey: contentBoundaryKey,
       displayName: entry.displayName,
       subfolder: entry.subfolder.trim(),
       scope,
@@ -39,6 +48,15 @@ export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
       ignoreGlobs,
       renameRule: entry.rename ?? null,
       unarchive: entry.unarchive ?? null,
+      identity: {
+        normalizedPath: scope.normalizedPath,
+        normalizedTorrentUrls,
+        key: contentBoundaryKey,
+      },
+      hydration: {
+        mode: scope.isArchiveSelection ? "archive" : "standard",
+        key: hydrationKey,
+      },
       folderPreview: {
         directDownloadBase: joinPreviewPath(entry.subfolder.trim()),
         archiveMode,
@@ -48,164 +66,108 @@ export function buildPreviewEntries(document: SourceDocument): PreviewEntry[] {
   });
 }
 
-export function validateRuntime(document: SourceDocument): ValidationIssue[] {
-  const issues: ValidationIssue[] = [];
+export function buildRepairableValidationSnapshot(
+  document: SourceDocument,
+  entries = buildPreviewEntries(document),
+): RepairableValidationSnapshot {
+  const issues = document.entries.flatMap((entry, index) =>
+    validateEditableEntry(entry, entries[index]),
+  );
+  const issuesBySourceId: Record<string, RepairableValidationIssue[]> = {};
 
-  if (document.version !== 1) {
-    issues.push({
-      kind: "runtime-invalid-version",
-      message: `Unsupported source version: ${document.version}.`,
-    });
+  for (const issue of issues) {
+    issuesBySourceId[issue.sourceId] ??= [];
+    issuesBySourceId[issue.sourceId]?.push(issue);
   }
 
-  for (const entry of document.entries) {
-    if (entry.subfolder.trim().length === 0) {
+  return {
+    issues,
+    issuesBySourceId,
+    saveReadiness:
+      issues.length === 0
+        ? {
+            status: "ready",
+            blockers: [],
+          }
+        : {
+            status: "blocked",
+            blockers: issues.map((issue) => ({
+              code: "repairable-validation" as const,
+              message: issue.message,
+              sourceId: issue.sourceId,
+              sourceName: issue.sourceName,
+            })),
+          },
+  };
+}
+
+export function findUnsupportedFeatureIssues(
+  document: SourceDocument,
+): BlockedDocumentIssue[] {
+  return document.entries.flatMap((entry) => {
+    const issues: BlockedDocumentIssue[] = [];
+    if (entry.scope?.includeNestedFiles === true) {
       issues.push({
-        kind: "runtime-invalid-subfolder",
-        message: `Invalid subfolder: ${entry.subfolder}.`,
+        family: "unsupported-editor-features",
+        heading: "Unsupported editor features",
+        code: "unsupported-include-nested-files",
+        message: `Source "${entry.displayName}" uses Include nested files, which this editor does not support yet.`,
       });
     }
-
-    const normalizedScope = normalizeScope(entry.scope);
-    if (normalizedScope === null) {
+    if (entry.unarchive?.recursive === true) {
       issues.push({
-        kind: "runtime-invalid-path",
-        message: `Invalid path: ${entry.scope?.path ?? ""}.`,
-      });
-    } else if (
-      normalizedScope.isArchiveSelection &&
-      normalizedScope.includeNestedFiles
-    ) {
-      issues.push({
-        kind: "runtime-invalid-scope",
-        message: "Exact .zip scope cannot set includeNestedFiles to true.",
+        family: "unsupported-editor-features",
+        heading: "Unsupported editor features",
+        code: "unsupported-recursive-unarchive",
+        message: `Source "${entry.displayName}" uses Recursive unarchive, which this editor does not support yet.`,
       });
     }
+    return issues;
+  });
+}
 
-    for (const pattern of entry.ignore?.glob ?? []) {
-      if (!isValidIgnoreRule(pattern)) {
-        issues.push({
-          kind: "runtime-invalid-ignore-rule",
-          message: `Invalid ignore rule: ${pattern}.`,
-        });
+export function findDuplicateSourceIssues(
+  document: SourceDocument,
+  entries = buildPreviewEntries(document),
+): BlockedDocumentIssue[] {
+  const issues: BlockedDocumentIssue[] = [];
+
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index];
+    if (!entry) {
+      continue;
+    }
+
+    for (let candidateIndex = index + 1; candidateIndex < entries.length; candidateIndex += 1) {
+      const candidate = entries[candidateIndex];
+      if (!candidate) {
+        continue;
       }
-    }
 
-    const renameIssue = validateRenameRule(entry.rename, "Rename pattern is invalid");
-    if (renameIssue) {
-      issues.push(renameIssue);
-    }
+      if (entry.identity.normalizedPath !== candidate.identity.normalizedPath) {
+        continue;
+      }
 
-    const layoutRenameIssue = validateRenameRule(
-      entry.unarchive?.layout.rename,
-      "Dedicated-folder rename pattern is invalid",
-    );
-    if (layoutRenameIssue) {
-      issues.push(layoutRenameIssue);
+      const sharedTorrentUrl = entry.identity.normalizedTorrentUrls.find((url) =>
+        candidate.identity.normalizedTorrentUrls.includes(url),
+      );
+      if (!sharedTorrentUrl) {
+        continue;
+      }
+
+      issues.push({
+        family: "duplicate-sources",
+        heading: "Duplicate sources",
+        code: "duplicate-source",
+        message: `Sources "${document.entries[index]?.displayName ?? entry.displayName}" and "${document.entries[candidateIndex]?.displayName ?? candidate.displayName}" are duplicates because they share a magnet URL and the same scope.`,
+      });
     }
   }
 
   return issues;
 }
 
-function validateRenameRule(
-  rule: RenameRule | undefined,
-  invalidPrefix: string,
-): ValidationIssue | null {
-  if (!rule) {
-    return null;
-  }
-
-  if (rule.pattern.trim().length === 0 || rule.replacement.trim().length === 0) {
-    return {
-      kind: "runtime-invalid-rename-rule",
-      message: `${invalidPrefix.replace("pattern is invalid", "rule requires both pattern and replacement")}.`,
-    };
-  }
-
-  try {
-    new RegExp(rule.pattern);
-    return null;
-  } catch (error) {
-    const message =
-      error instanceof Error && error.message.length > 0
-        ? `${invalidPrefix}: ${error.message}`
-        : `${invalidPrefix}.`;
-    return {
-      kind: "runtime-invalid-rename-rule",
-      message,
-    };
-  }
-}
-
-function stableEntryId(
-  index: number,
-  entry: SourceEntryDocument,
-  normalizedPath: string,
-): string {
-  const seed = [
-    String(index),
-    entry.displayName,
-    entry.subfolder,
-    normalizedPath,
-    String(entry.scope?.includeNestedFiles ?? false),
-    ...entry.torrents.flatMap((torrent) => [torrent.url, torrent.partName ?? ""]),
-  ].join("|");
-
-  return createHash("sha256").update(seed).digest("hex").slice(0, 12);
-}
-
-function stableHydrationKey(
-  entry: SourceEntryDocument,
-  normalizedPath: string,
-): string {
-  const mode = normalizedPath.toLowerCase().endsWith(ZIP_SUFFIX)
-    ? "archive"
-    : "standard";
-  const torrentUrls = entry.torrents
-    .map((torrent) => torrent.url.trim())
-    .sort()
-    .join("|");
-  const seed =
-    mode === "archive"
-      ? `${mode}|${torrentUrls}|${normalizedPath}`
-      : `${mode}|${torrentUrls}`;
-
-  return createHash("sha256").update(seed).digest("hex");
-}
-
-function stableSelectionStateKey(
-  hydrationKey: string,
-  scope: PreviewEntry["scope"],
-): string {
-  const seed = [
-    hydrationKey,
-    scope.normalizedPath,
-    String(scope.includeNestedFiles),
-    scope.isArchiveSelection ? "archive" : "standard",
-  ].join("|");
-
-  return createHash("sha256").update(seed).digest("hex");
-}
-
-function joinPreviewPath(...segments: string[]): string {
-  const filtered = segments
-    .flatMap((segment) => segment.split("/"))
-    .map((segment) => segment.trim())
-    .filter((segment) => segment.length > 0);
-
-  return filtered.length === 0 ? "/" : `/${filtered.join("/")}`;
-}
-
-function defaultScope() {
-  return {
-    normalizedPath: ROOT_PATH,
-    includeNestedFiles: false,
-    isArchiveSelection: false,
-  };
-}
-
-function normalizeScope(scope: SourceScopeDocument | undefined) {
+export function normalizeScope(scope: SourceScopeDocument | undefined) {
   if (!scope) {
     return defaultScope();
   }
@@ -222,7 +184,7 @@ function normalizeScope(scope: SourceScopeDocument | undefined) {
   };
 }
 
-function normalizeDeclaredPath(raw: string): string | null {
+export function normalizeDeclaredPath(raw: string): string | null {
   const trimmed = raw.trim();
   const candidate =
     trimmed.length === 0 || trimmed.includes("\\")
@@ -252,4 +214,148 @@ function normalizeDeclaredPath(raw: string): string | null {
   }
 
   return null;
+}
+
+export function normalizeTorrentUrls(entry: Pick<SourceEntryDocument, "torrents">) {
+  return Array.from(
+    new Set(
+      entry.torrents
+        .map((torrent) => torrent.url.trim())
+        .filter((url) => url.length > 0),
+    ),
+  ).sort();
+}
+
+function validateEditableEntry(
+  entry: SourceEntryDocument,
+  previewEntry: PreviewEntry | undefined,
+): RepairableValidationIssue[] {
+  if (!previewEntry) {
+    return [];
+  }
+
+  const issues: RepairableValidationIssue[] = [];
+  const normalizedIgnoreGlobs = (entry.ignore?.glob ?? [])
+    .map((glob) => glob.trim())
+    .filter((glob) => glob.length > 0);
+  for (const glob of normalizedIgnoreGlobs) {
+    if (!isValidIgnoreRule(glob)) {
+      issues.push({
+        code: "invalid-ignore-rule",
+        sourceId: previewEntry.id,
+        sourceName: previewEntry.displayName,
+        fieldPath: "ignore.glob",
+        message: `Invalid ignore rule: ${glob}.`,
+      });
+    }
+  }
+
+  const renameIssue = validateRenameRule(entry.rename, "Rename pattern is invalid");
+  if (renameIssue) {
+    issues.push({
+      code: "invalid-rename-rule",
+      sourceId: previewEntry.id,
+      sourceName: previewEntry.displayName,
+      fieldPath: "rename",
+      message: renameIssue,
+    });
+  }
+
+  if (entry.unarchive?.layout.mode === "dedicatedFolder") {
+    const dedicatedFolderRenameIssue = validateRenameRule(
+      entry.unarchive.layout.rename,
+      "Dedicated-folder rename pattern is invalid",
+      "Dedicated-folder rename rule requires both pattern and replacement.",
+    );
+    if (dedicatedFolderRenameIssue) {
+      issues.push({
+        code: "invalid-dedicated-folder-rename-rule",
+        sourceId: previewEntry.id,
+        sourceName: previewEntry.displayName,
+        fieldPath: "unarchive.layout.rename",
+        message: dedicatedFolderRenameIssue,
+      });
+    }
+  }
+
+  return issues;
+}
+
+function validateRenameRule(
+  rule: RenameRule | undefined,
+  invalidPrefix: string,
+  missingMessage = "Rename rule requires both pattern and replacement.",
+): string | null {
+  if (!rule) {
+    return null;
+  }
+
+  if (rule.pattern.trim().length === 0 || rule.replacement.trim().length === 0) {
+    return missingMessage;
+  }
+
+  try {
+    new RegExp(rule.pattern);
+    return null;
+  } catch (error) {
+    return error instanceof Error && error.message.length > 0
+      ? `${invalidPrefix}: ${error.message}`
+      : `${invalidPrefix}.`;
+  }
+}
+
+function stableEntryId(
+  index: number,
+  entry: SourceEntryDocument,
+  normalizedPath: string,
+): string {
+  const seed = [
+    String(index),
+    entry.displayName,
+    entry.subfolder,
+    normalizedPath,
+    ...entry.torrents.flatMap((torrent) => [torrent.url.trim(), torrent.partName ?? ""]),
+  ].join("|");
+
+  return hashHex(seed).slice(0, 12);
+}
+
+function stableContentBoundaryKey(
+  normalizedTorrentUrls: string[],
+  normalizedPath: string,
+): string {
+  const seed = [...normalizedTorrentUrls, normalizedPath].join("|");
+  return hashHex(seed);
+}
+
+function stableHydrationKey(
+  normalizedTorrentUrls: string[],
+  normalizedPath: string,
+): string {
+  const mode = normalizedPath.toLowerCase().endsWith(ZIP_SUFFIX)
+    ? "archive"
+    : "standard";
+  const seed =
+    mode === "archive"
+      ? `${mode}|${normalizedTorrentUrls.join("|")}|${normalizedPath}`
+      : `${mode}|${normalizedTorrentUrls.join("|")}`;
+
+  return hashHex(seed);
+}
+
+function joinPreviewPath(...segments: string[]): string {
+  const filtered = segments
+    .flatMap((segment) => segment.split("/"))
+    .map((segment) => segment.trim())
+    .filter((segment) => segment.length > 0);
+
+  return filtered.length === 0 ? "/" : `/${filtered.join("/")}`;
+}
+
+function defaultScope() {
+  return {
+    normalizedPath: ROOT_PATH,
+    includeNestedFiles: false,
+    isArchiveSelection: false,
+  };
 }

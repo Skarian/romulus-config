@@ -1,24 +1,12 @@
-import { readFileSync, existsSync } from "node:fs";
 import path from "node:path";
-import Ajv2020 from "ajv/dist/2020.js";
 
-import { buildPreviewEntries, validateRuntime } from "./runtimeValidation";
-import type {
-  HydrationState,
-  SimulatorState,
-  SourceDocument,
-  ValidationIssue,
-} from "./types";
+import { loadSourceDocument } from "./sourceDocument";
+import type { HydrationState, HydrationSourceState, SimulatorState } from "./types";
 
 export function buildSimulatorState(
   repoRoot: string,
   hydrationInput?: Partial<HydrationState>,
 ): SimulatorState {
-  const configPath = path.join(repoRoot, "source.json");
-  const schemaPath = path.join(
-    repoRoot,
-    "references/romulus/docs/schema.json",
-  );
   const cachePath = path.join(repoRoot, "simulator/.local");
   const generatedAt = new Date().toISOString();
   const notes = [
@@ -34,126 +22,65 @@ export function buildSimulatorState(
     logs: hydrationInput?.logs ?? [],
     sourceStates: hydrationInput?.sourceStates ?? {},
   };
+  const documentLoad = loadSourceDocument(repoRoot);
 
-  if (!existsSync(configPath)) {
+  if (documentLoad.status === "blocked") {
     return {
-      status: "missing",
+      status: "blocked",
       generatedAt,
-      configPath,
-      schemaPath,
+      configPath: documentLoad.configPath,
+      schemaPath: documentLoad.schemaPath,
       cachePath,
-      issues: [
-        {
-          kind: "json",
-          message:
-            "source.json is missing. Add or restore it at the repo root to use the simulator.",
-        },
-      ],
-      entries: [],
       notes,
-      hydration: baseHydration,
+      diskFingerprint: documentLoad.diskFingerprint,
+      blocked: documentLoad.blocked,
+      editable: null,
+      entries: [],
+      hydration: {
+        ...baseHydration,
+        missingSourceIds: [],
+        sourceStates: {},
+      },
     };
   }
 
-  const rawDocument = readText(configPath);
-  let parsedDocument: SourceDocument;
-  try {
-    parsedDocument = JSON.parse(rawDocument) as SourceDocument;
-  } catch (error) {
-    return {
-      status: "invalid",
-      generatedAt,
-      configPath,
-      schemaPath,
-      cachePath,
-      issues: [
-        {
-          kind: "json",
-          message:
-            error instanceof Error
-              ? error.message
-              : "source.json is not valid JSON.",
-        },
-      ],
-      entries: [],
-      notes,
-      hydration: baseHydration,
-    };
-  }
+  const sourceStates: Record<string, HydrationSourceState> = {};
+  const missingSourceIds: string[] = [];
 
-  const schemaIssues = validateSchema(schemaPath, parsedDocument);
-  if (schemaIssues.length > 0) {
-    return {
-      status: "invalid",
-      generatedAt,
-      configPath,
-      schemaPath,
-      cachePath,
-      issues: schemaIssues,
-      entries: [],
-      notes,
-      hydration: baseHydration,
-    };
-  }
+  for (const entry of documentLoad.entries) {
+    const cached = baseHydration.sourceStates[entry.id];
+    if (!cached) {
+      missingSourceIds.push(entry.id);
+      sourceStates[entry.id] = {
+        mode: entry.hydration.mode,
+        status: "missing",
+        updatedAt: null,
+        fileCount: 0,
+        statusLabel: null,
+        progressPercent: null,
+        errorMessage: null,
+      };
+      continue;
+    }
 
-  const runtimeIssues = validateRuntime(parsedDocument);
-  const entries = buildPreviewEntries(parsedDocument);
-  const hydration = {
-    ...baseHydration,
-    missingSourceIds:
-      hydrationInput?.missingSourceIds ?? entries.map((entry) => entry.id),
-  };
-
-  if (runtimeIssues.length > 0) {
-    return {
-      status: "invalid",
-      generatedAt,
-      configPath,
-      schemaPath,
-      cachePath,
-      issues: runtimeIssues,
-      entries,
-      notes,
-      hydration,
-    };
+    sourceStates[entry.id] = cached;
   }
 
   return {
-    status: "accepted",
+    status: "editable",
     generatedAt,
-    configPath,
-    schemaPath,
+    configPath: documentLoad.configPath,
+    schemaPath: documentLoad.schemaPath,
     cachePath,
-    issues: [],
-    entries,
     notes,
-    hydration,
+    diskFingerprint: documentLoad.diskFingerprint,
+    blocked: null,
+    editable: documentLoad.editable,
+    entries: documentLoad.entries,
+    hydration: {
+      ...baseHydration,
+      missingSourceIds,
+      sourceStates,
+    },
   };
-}
-
-function validateSchema(
-  schemaPath: string,
-  document: SourceDocument,
-): ValidationIssue[] {
-  const ajv = new Ajv2020({
-    allErrors: true,
-    strict: false,
-  });
-
-  const schemaText = readText(schemaPath);
-  const validate = ajv.compile(JSON.parse(schemaText));
-  const valid = validate(document);
-
-  if (valid) {
-    return [];
-  }
-
-  return (validate.errors ?? []).map((error) => ({
-    kind: "schema",
-    message: `${error.instancePath || "/"} ${error.message ?? "Schema validation failed"}`.trim(),
-  }));
-}
-
-function readText(filePath: string): string {
-  return readFileSync(filePath, "utf8");
 }

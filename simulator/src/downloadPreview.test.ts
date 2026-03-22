@@ -65,6 +65,8 @@ test("buildDownloadPreview applies dedicated-folder and entry rename for standar
     updatedAt: new Date().toISOString(),
   };
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -127,6 +129,8 @@ test("buildDownloadPreview saves non-archive archive-selection rows directly int
     },
   ];
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "archive",
@@ -182,6 +186,8 @@ test("buildDownloadPreview keeps the dedicated folder visible before sample file
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -247,6 +253,8 @@ test("buildDownloadPreview generates archive samples from source-level extension
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -311,6 +319,8 @@ test("buildDownloadPreview ignores persisted output overrides and uses current r
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -384,6 +394,8 @@ test("buildDownloadPreview keeps original directory input out of the final outpu
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -455,6 +467,8 @@ test("buildDownloadPreview uses the selected archive entry name for dedicated re
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "archive",
@@ -511,6 +525,8 @@ test("buildDownloadPreview keeps nested archive outputs empty without a pattern 
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -580,6 +596,8 @@ test("buildDownloadPreview does not apply entry rename to extracted archive file
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -652,6 +670,8 @@ test("buildDownloadPreview keeps flat standard archive extraction in the entry s
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -727,6 +747,8 @@ test("buildDownloadPreview keeps flat archive-selection extraction in the entry 
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "archive",
@@ -803,6 +825,8 @@ test("buildDownloadPreview keeps recursive flat extraction in the entry subfolde
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",
@@ -894,6 +918,8 @@ test("buildDownloadPreview numbers duplicate direct outputs instead of collapsin
   ];
 
   const sourceFiles: SourceFilesState = {
+    hydrationKey: entry.hydrationKey,
+    selectionStateKey: entry.selectionStateKey,
     entryId: entry.id,
     sourceStatus: "ready",
     sourceMode: "standard",

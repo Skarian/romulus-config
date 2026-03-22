@@ -125,6 +125,40 @@ test("buildScopedStandardSourceFiles keeps scoped rows before ignore filtering",
   );
 });
 
+test("buildScopedStandardSourceFiles sorts file names case-insensitively and keeps same-name ties stable", () => {
+  const [entry] = buildPreviewEntries({
+    version: 1,
+    entries: [
+      {
+        displayName: "Nintendo Game Boy Advance",
+        subfolder: "gba",
+        scope: {
+          path: "/roms/",
+        },
+        torrents: [
+          {
+            url: "magnet:?xt=urn:btih:ORDER",
+          },
+        ],
+      },
+    ],
+  });
+
+  const files: CachedProviderFileRecord[] = [
+    providerFile("/roms/beta.gb", 10),
+    providerFile("/roms/Alpha.gb", 11),
+    providerFile("/roms/alpha.gb", 12),
+    providerFile("/roms/Beta.gb", 13),
+  ];
+
+  const result = buildScopedStandardSourceFiles(entry, files);
+
+  assert.deepEqual(
+    result.map((file) => file.originalName),
+    ["Alpha.gb", "alpha.gb", "beta.gb", "Beta.gb"],
+  );
+});
+
 test("buildScopedArchiveSourceFiles keeps archive rows before ignore filtering", () => {
   const files: CachedArchiveEntryDescriptor[] = [
     archiveEntry("Games/Alpha.gb", 10),
@@ -136,6 +170,22 @@ test("buildScopedArchiveSourceFiles keeps archive rows before ignore filtering",
   assert.deepEqual(
     result.map((file) => file.originalName),
     ["Alpha.gb", "readme.txt"],
+  );
+});
+
+test("buildScopedArchiveSourceFiles sorts file names case-insensitively and keeps same-name ties stable", () => {
+  const files: CachedArchiveEntryDescriptor[] = [
+    archiveEntry("Games/beta.gb", 10),
+    archiveEntry("Games/Alpha.gb", 11),
+    archiveEntry("Games/alpha.gb", 12),
+    archiveEntry("Games/Beta.gb", 13),
+  ];
+
+  const result = buildScopedArchiveSourceFiles(files);
+
+  assert.deepEqual(
+    result.map((file) => file.originalName),
+    ["Alpha.gb", "alpha.gb", "beta.gb", "Beta.gb"],
   );
 });
 

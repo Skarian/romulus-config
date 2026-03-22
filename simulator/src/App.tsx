@@ -1,68 +1,89 @@
 import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { Toaster, toast } from "react-hot-toast";
+import { combine } from "@atlaskit/pragmatic-drag-and-drop/combine";
+import {
+  draggable,
+  dropTargetForElements,
+} from "@atlaskit/pragmatic-drag-and-drop/element/adapter";
+import {
+  attachClosestEdge,
+  extractClosestEdge,
+  type Edge,
+} from "@atlaskit/pragmatic-drag-and-drop-hitbox/closest-edge";
+import { reorderWithEdge } from "@atlaskit/pragmatic-drag-and-drop-hitbox/util/reorder-with-edge";
 
 import initialSimulatorState from "virtual:romulus-simulator-state";
 
 import {
   formatArchiveSampleExtensions,
-  parseArchiveSampleExtensionsInput,
+  validateArchiveSampleExtensionsInput,
 } from "./archiveSamplePolicy";
 import { isSupportedArchiveName } from "./archiveSupport";
 import {
-  applyRenameRule,
+  buildDownloadPreview,
   type ArchiveFixtureDescriptor,
   type ArchiveFixtureSampleDescriptor,
-  buildDownloadPreview,
   finalOutputName,
   type PreviewTreeNode,
 } from "./downloadPreview";
-import { compileIgnoreMatcher, isValidIgnoreRule } from "./ignoreRules";
+import { useDocumentSession } from "./documentSession";
 import {
-  analyzeParentheticalSuffixes,
-  applyManagedRenameRule,
-  buildManagedRenameRule,
-  detectManagedRenamePolicy,
-} from "./policyAnalysis";
+  buildHydrationStateByHydrationKey,
+  getHydrationStateForEntry,
+} from "./hydrationStateLookup";
+import { buildPreviewEntries } from "./runtimeValidation";
+import { useSourceEditorController } from "./sourceEditorController";
+import { useSourceListController } from "./sourceListController";
 import {
   beginEntryRequest,
-  buildPhraseOptions,
+  buildSourceFilesRequest,
   isLatestEntryRequest,
   matchSourceFilesToEntry,
-  shouldForceSourceRefresh,
-  syncSourcePolicyEditorState,
-  type ManagedRenameDraft,
-  type PendingPolicySave,
   toggleSourceFileSelection,
   updateSourceFilesForEntry,
 } from "./sourcePolicyEditor";
 import type {
+  BlockedIssueGroup,
+  ClearLocalDataSelection,
+  EditableDocumentState,
   PreviewEntry,
-  PreviewFixture,
-  PreviewFixtureSample,
-  SimulatorState,
-  SourceFilesState,
-  SourceFileRow,
-} from "./types";
+    PreviewFixture,
+    PreviewFixtureSample,
+    SessionSourceReference,
+    SimulatorState,
+    SourceDocumentSavePreparationResult,
+    SourceFilesRequest,
+    SourceFilesState,
+    SourceFileRow,
+  } from "./types";
 
-type SourcePolicyDraft = {
-  entryId: string;
-  renameMode: ManagedRenameDraft["mode"];
-  renamePhrases: string[];
-  ignoreGlobs: string[];
-  renameDirty: boolean;
-  ignoreDirty: boolean;
-  hasUnsavedChanges: boolean;
+type HydrationMode = "missing" | "all";
+
+type ClearDatabaseSelection = ClearLocalDataSelection;
+
+const EMPTY_CLEAR_DATABASE_SELECTION: ClearDatabaseSelection = {
+  fileCache: false,
+  savedSelections: false,
+  savedPreviewData: false,
+  updateLogs: false,
+};
+
+type SourceRowDragData = {
+  type: "source-row";
+  sourceRef: SessionSourceReference;
 };
 
 function App() {
   const [state, setState] = useState<SimulatorState>(initialSimulatorState);
-  const [selectedEntryId, setSelectedEntryId] = useState<string | null>(null);
+  const [sessionEditableState, setSessionEditableState] = useState<EditableDocumentState | null>(
+    initialSimulatorState.status === "editable" ? initialSimulatorState.editable : null,
+  );
+  const [selectedSourceRef, setSelectedSourceRef] = useState<SessionSourceReference | null>(null);
   const [selectedSourceFiles, setSelectedSourceFiles] = useState<SourceFilesState | null>(null);
-  const [sourcePolicyDraft, setSourcePolicyDraft] = useState<SourcePolicyDraft | null>(null);
   const [infoEntryId, setInfoEntryId] = useState<string | null>(null);
-  const [showConfigDetails, setShowConfigDetails] = useState(false);
-  const [showErrorDetails, setShowErrorDetails] = useState(false);
   const [showHydrationModal, setShowHydrationModal] = useState(false);
+  const [hydrationMode, setHydrationMode] = useState<HydrationMode>("missing");
+  const [showRefreshDraftConflictModal, setShowRefreshDraftConflictModal] = useState(false);
   const [showLogModal, setShowLogModal] = useState(false);
   const [showVerboseLogs, setShowVerboseLogs] = useState(false);
   const [hydrationRequestError, setHydrationRequestError] = useState<string | null>(null);
@@ -70,141 +91,79 @@ function App() {
   const [sourceFilesRequestRevision, setSourceFilesRequestRevision] = useState(0);
   const [previewRequestError, setPreviewRequestError] = useState<string | null>(null);
   const [showArchivePatternModal, setShowArchivePatternModal] = useState(false);
+  const [archivePatternPromptMode, setArchivePatternPromptMode] = useState<
+    "auto" | "manual" | null
+  >(null);
   const [archivePatternDraft, setArchivePatternDraft] = useState("");
   const [archivePatternError, setArchivePatternError] = useState<string | null>(null);
   const [savingArchivePattern, setSavingArchivePattern] = useState(false);
-  const selectedEntryIdRef = useRef<string | null>(selectedEntryId);
+  const [showManualReloadModal, setShowManualReloadModal] = useState(false);
+  const [showExternalReloadModal, setShowExternalReloadModal] = useState(false);
+  const [missingCacheSourceName, setMissingCacheSourceName] = useState<string | null>(null);
+  const [savePreparation, setSavePreparation] = useState<
+    Extract<SourceDocumentSavePreparationResult, { status: "ready" }> | null
+  >(null);
+  const [savingSourceDocument, setSavingSourceDocument] = useState(false);
+  const [pendingRefreshAfterSave, setPendingRefreshAfterSave] = useState<HydrationMode | null>(
+    null,
+  );
+  const [reopenHydrationOnSaveCancel, setReopenHydrationOnSaveCancel] = useState(false);
+  const [showClearDatabaseModal, setShowClearDatabaseModal] = useState(false);
+  const [showClearDatabaseConfirmModal, setShowClearDatabaseConfirmModal] = useState(false);
+  const [clearDatabaseSelection, setClearDatabaseSelection] = useState<ClearDatabaseSelection>(
+    EMPTY_CLEAR_DATABASE_SELECTION,
+  );
+  const [clearingDatabase, setClearingDatabase] = useState(false);
+  const [showDatabaseMenu, setShowDatabaseMenu] = useState(false);
   const selectedFileSaveRevisionRef = useRef(new Map<string, number>());
   const previewFixtureSaveRevisionRef = useRef(new Map<string, number>());
   const archivePatternSaveRevisionRef = useRef(new Map<string, number>());
-
-  const selectedEntry =
-    state.entries.find((entry) => entry.id === selectedEntryId) ?? null;
-  const selectedEntryHydrationState =
-    selectedEntryId ? state.hydration.sourceStates[selectedEntryId] ?? null : null;
+  const pendingLocalConfigUpdateCountRef = useRef(0);
+  const previousSelectedSourceRef = useRef<SessionSourceReference | null>(null);
+  const lastHydrationRunIdRef = useRef<number | null>(state.hydration.lastRun?.runId ?? null);
+  const databaseMenuRef = useRef<HTMLDivElement | null>(null);
+  const documentSession = useDocumentSession(
+    sessionEditableState,
+  );
+  const hydrationStatesByHydrationKey = useMemo(
+    () => buildHydrationStateByHydrationKey(state.entries, state.hydration.sourceStates),
+    [state.entries, state.hydration.sourceStates],
+  );
+  const sourceListController = useSourceListController({
+    documentSession,
+    hydrationStatesByHydrationKey,
+  });
+  const selectedSource =
+    documentSession?.selectors.getSource(selectedSourceRef) ?? null;
+  const selectedEntry = selectedSource?.entry ?? null;
+  const selectedSourceFilesRequest = useMemo(
+    () => (selectedEntry ? buildSourceFilesRequest(selectedEntry) : null),
+    [selectedEntry],
+  );
+  const selectedEntryHydrationState = getHydrationStateForEntry(
+    selectedEntry,
+    hydrationStatesByHydrationKey,
+  );
   const selectedEntrySourceFiles = matchSourceFilesToEntry(
-    selectedEntry?.id ?? null,
+    selectedEntry,
     selectedSourceFiles,
   );
-  const infoEntry =
-    state.entries.find((entry) => entry.id === infoEntryId) ?? null;
-  const activeDraft =
-    selectedEntry && sourcePolicyDraft?.entryId === selectedEntry.id
-      ? sourcePolicyDraft
-      : null;
-  const analysisFileNames = useMemo(
-    () =>
-      selectedEntrySourceFiles?.sourceStatus === "ready"
-        ? (selectedEntrySourceFiles?.analysisOriginalNames ??
-          selectedEntrySourceFiles?.analysisFiles?.map((file) => file.originalName) ??
-          selectedEntrySourceFiles?.files.map((file) => file.originalName) ??
-          [])
-        : [],
-    [selectedEntrySourceFiles],
-  );
-  const availableDraftPhrases = useMemo(
-    () =>
-      analyzeParentheticalSuffixes(analysisFileNames).parentheticalPhrases.map(
-        (phrase) => phrase.phrase,
-      ),
-    [analysisFileNames],
-  );
-  const normalizedDraftIgnoreGlobs = useMemo(
-    () => normalizeSourcePolicyGlobs(activeDraft?.ignoreGlobs ?? []),
-    [activeDraft],
-  );
-  const hasInvalidDraftIgnoreGlobs = useMemo(
-    () => normalizedDraftIgnoreGlobs.some((glob) => !isValidIgnoreRule(glob)),
-    [normalizedDraftIgnoreGlobs],
-  );
-  const effectiveEntry = useMemo(() => {
-    if (!selectedEntry) {
-      return null;
-    }
-    if (!activeDraft?.hasUnsavedChanges) {
-      return selectedEntry;
-    }
-
-    const renameRule = activeDraft.renameDirty
-      ? buildManagedRenameRule(
-          activeDraft.renameMode,
-          activeDraft.renameMode === "all"
-            ? availableDraftPhrases
-            : activeDraft.renamePhrases,
-          availableDraftPhrases,
-        )
-      : selectedEntry.renameRule;
-    const ignoreGlobs =
-      activeDraft.ignoreDirty && !hasInvalidDraftIgnoreGlobs
-        ? normalizedDraftIgnoreGlobs
-        : selectedEntry.ignoreGlobs;
-
-    return {
-      ...selectedEntry,
-      renameRule,
-      ignoreGlobs,
-    };
-  }, [
-    activeDraft,
-    availableDraftPhrases,
-    hasInvalidDraftIgnoreGlobs,
-    normalizedDraftIgnoreGlobs,
-    selectedEntry,
-  ]);
-  const effectiveSourceFiles = useMemo(() => {
-    if (!selectedEntrySourceFiles || selectedEntrySourceFiles.sourceStatus !== "ready") {
-      return selectedEntrySourceFiles;
-    }
-
-    const rawFiles = selectedEntrySourceFiles.analysisFiles ?? selectedEntrySourceFiles.files;
-    const ignoreGlobs =
-      activeDraft?.ignoreDirty && !hasInvalidDraftIgnoreGlobs
-        ? normalizedDraftIgnoreGlobs
-        : selectedEntry?.ignoreGlobs ?? [];
-    const visibleFiles = filterSourceFilesByIgnoreGlobs(rawFiles, ignoreGlobs);
-    const visibleFileIds = new Set(visibleFiles.map((file) => file.id));
-
-    return {
-      ...selectedEntrySourceFiles,
-      files: visibleFiles,
-      selectedRowIds: (selectedEntrySourceFiles.selectedRowIds ?? []).filter((fileId) =>
-        visibleFileIds.has(fileId),
-      ),
-    };
-  }, [
-    activeDraft,
-    hasInvalidDraftIgnoreGlobs,
-    normalizedDraftIgnoreGlobs,
-    selectedEntry?.ignoreGlobs,
-    selectedEntrySourceFiles,
-  ]);
-  const selectedRowIds = effectiveSourceFiles?.selectedRowIds ?? [];
+  const infoEntry = sourceListController.rows.find((row) => row.entry.id === infoEntryId)?.entry ?? null;
+  const sourceEditorController = useSourceEditorController({
+    documentSession,
+    sourceRef: selectedSourceRef,
+    sourceFiles: selectedEntrySourceFiles,
+  });
+  const effectiveSourceFiles = sourceEditorController.effectiveSourceFiles;
+  const visibleSourceFiles = sourceEditorController.visibleSourceFiles;
+  const selectedRowIds = sourceEditorController.selectedRowIds;
   const archiveSampleExtensions = selectedEntrySourceFiles?.archiveSampleExtensions ?? [];
-  const selectedActualRows = useMemo(() => {
-    if (!effectiveSourceFiles || !effectiveEntry) {
-      return [];
-    }
-    const selectedSet = new Set(selectedRowIds);
-    return effectiveSourceFiles.files.filter((file) => selectedSet.has(file.id));
-  }, [effectiveEntry, effectiveSourceFiles, selectedRowIds]);
-  const downloadPreview = useMemo(
-    () =>
-      effectiveEntry
-        ? buildDownloadPreview(effectiveEntry, effectiveSourceFiles, selectedActualRows)
-        : {
-            tree: {
-              name: "/",
-              pathKey: "",
-              kind: "folder" as const,
-              children: [],
-            },
-            archiveFixtures: [],
-          },
-    [effectiveEntry, effectiveSourceFiles, selectedActualRows],
+  const archivePatternValidation = useMemo(
+    () => validateArchiveSampleExtensionsInput(archivePatternDraft),
+    [archivePatternDraft],
   );
-  const missingSourceNames = state.entries
-    .filter((entry) => state.hydration.missingSourceIds.includes(entry.id))
-    .map((entry) => entry.displayName);
+  const selectedActualRows = sourceEditorController.selectedActualRows;
+  const downloadPreview = sourceEditorController.downloadPreview;
   const visibleLogs = useMemo(
     () =>
       state.hydration.logs.filter(
@@ -212,12 +171,38 @@ function App() {
       ),
     [showVerboseLogs, state.hydration.logs],
   );
+  const structureModal = sourceListController.structureModal;
+  const structureValidation = sourceListController.structureValidation;
+  const deleteSource = sourceListController.deleteSource;
+  const sourceListRowOrder = useMemo(
+    () => sourceListController.rows.map((row) => row.ref),
+    [sourceListController.rows],
+  );
+  const hasHydrationLogs = state.hydration.running || state.hydration.logs.length > 0;
+  const canStartMissingCacheRefresh = sourceListController.rows.some((row) => row.missingCache);
+  const canStartHydration =
+    state.entries.length > 0 &&
+    state.hydration.apiKeyConfigured &&
+    !state.hydration.running &&
+    (hydrationMode === "all" || canStartMissingCacheRefresh);
+  const clearDatabaseSelectionCount = Object.values(clearDatabaseSelection).filter(Boolean).length;
+  const configStatusInvalid =
+    state.status === "blocked" ||
+    (state.status === "editable" && state.editable.validation.issues.length > 0);
+  const configStatusLabel = configStatusInvalid ? "Config invalid" : "Config valid";
+  const sourceCountLabel = `${sourceListController.rows.length} source${sourceListController.rows.length === 1 ? "" : "s"} configured`;
+  const draftStatusLabel = formatDraftStatusSummary({
+    dirty: sourceListController.dirty,
+    dirtyEntryCount: sourceListController.rows.filter((row) => row.dirty).length,
+    baselineEntryCount: documentSession?.selectors.baselineDocument?.entries.length ?? 0,
+    draftEntryCount: documentSession?.selectors.draftDocument?.entries.length ?? 0,
+  });
   const selectedEntryHydrationRefreshKey = useMemo(() => {
-    if (!selectedEntryId) {
+    if (!selectedEntry?.hydrationKey) {
       return null;
     }
     return JSON.stringify({
-      entryId: selectedEntryId,
+      hydrationKey: selectedEntry.hydrationKey,
       status: selectedEntryHydrationState?.status ?? "missing",
       updatedAt: selectedEntryHydrationState?.updatedAt ?? null,
       errorMessage: selectedEntryHydrationState?.errorMessage ?? null,
@@ -226,28 +211,108 @@ function App() {
     selectedEntryHydrationState?.errorMessage,
     selectedEntryHydrationState?.status,
     selectedEntryHydrationState?.updatedAt,
-    selectedEntryId,
+    selectedEntry?.hydrationKey,
   ]);
   const hasOpenModal =
-    showHydrationModal || showLogModal || infoEntry !== null;
+    showHydrationModal ||
+    showRefreshDraftConflictModal ||
+    showLogModal ||
+    infoEntry !== null ||
+    showManualReloadModal ||
+    showExternalReloadModal ||
+    missingCacheSourceName !== null ||
+    savePreparation !== null ||
+    showClearDatabaseModal ||
+    showClearDatabaseConfirmModal;
 
   useEffect(() => {
-    selectedEntryIdRef.current = selectedEntryId;
-  }, [selectedEntryId]);
+    if (state.status === "blocked") {
+      setSelectedSourceRef(null);
+    }
+  }, [state.status]);
+
+  useEffect(() => {
+    const lastRun = state.hydration.lastRun;
+    if (!lastRun || lastHydrationRunIdRef.current === lastRun.runId) {
+      return;
+    }
+    lastHydrationRunIdRef.current = lastRun.runId;
+    if (lastRun.outcome === "success") {
+      toast.success("Database update completed.");
+      return;
+    }
+    if (lastRun.outcome === "mixed") {
+      toast(
+        `Database update finished: ${lastRun.successCount} succeeded, ${lastRun.failureCount} failed. Open View Logs for more detail.`,
+      );
+      return;
+    }
+    toast.error("Database update failed. Open View Logs for more detail.");
+  }, [state.hydration.lastRun]);
+
+  useEffect(() => {
+    if (previousSelectedSourceRef.current !== null && selectedSourceRef === null) {
+      window.scrollTo({ top: 0 });
+    }
+    previousSelectedSourceRef.current = selectedSourceRef;
+  }, [selectedSourceRef]);
+
+  useEffect(() => {
+    if (!showDatabaseMenu) {
+      return;
+    }
+
+    function handlePointerDown(event: PointerEvent) {
+      if (
+        databaseMenuRef.current &&
+        event.target instanceof Node &&
+        !databaseMenuRef.current.contains(event.target)
+      ) {
+        setShowDatabaseMenu(false);
+      }
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setShowDatabaseMenu(false);
+      }
+    }
+
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [showDatabaseMenu]);
+
+  useEffect(() => {
+    if (state.status !== "editable" || selectedEntry) {
+      setShowDatabaseMenu(false);
+    }
+  }, [selectedEntry, state.status]);
 
   useEffect(() => {
     setArchivePatternDraft(formatArchiveSampleExtensions(archiveSampleExtensions));
     setArchivePatternError(null);
-    if (selectedEntry?.unarchive && selectedEntrySourceFiles && archiveSampleExtensions.length === 0) {
+    if (
+      sourceEditorController.unarchiveRelevant &&
+      selectedEntry?.unarchive &&
+      selectedEntrySourceFiles &&
+      archiveSampleExtensions.length === 0
+    ) {
+      setArchivePatternPromptMode("auto");
       setShowArchivePatternModal(true);
       return;
     }
+    setArchivePatternPromptMode(null);
     setShowArchivePatternModal(false);
   }, [
     archiveSampleExtensions,
-    selectedEntry?.id,
+    sourceEditorController.unarchiveRelevant,
+    selectedEntry?.selectionStateKey,
     selectedEntry?.unarchive,
-    selectedEntrySourceFiles?.entryId,
+    selectedEntrySourceFiles?.selectionStateKey,
   ]);
 
   useEffect(() => {
@@ -257,7 +322,7 @@ function App() {
       void refreshState();
     });
     eventSource.addEventListener("config-updated", () => {
-      void handleConfigUpdated();
+      handleConfigUpdated();
     });
     return () => {
       eventSource.close();
@@ -265,16 +330,21 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!selectedEntryId) {
+    if (!selectedSourceFilesRequest) {
       setSelectedSourceFiles(null);
-      setSourcePolicyDraft(null);
       setSourceFilesRequestError(null);
       return;
     }
-    setSelectedSourceFiles((current) => (current?.entryId === selectedEntryId ? current : null));
+    setSelectedSourceFiles((current) =>
+      current &&
+      current.hydrationKey === selectedSourceFilesRequest.hydrationKey &&
+      current.selectionStateKey === selectedSourceFilesRequest.selectionStateKey
+        ? current
+        : null,
+    );
     setSourceFilesRequestError(null);
     let cancelled = false;
-    void loadSourceFiles(selectedEntryId)
+    void loadSourceFiles(selectedSourceFilesRequest)
       .then((nextState) => {
         if (!cancelled) {
           setSelectedSourceFiles(nextState);
@@ -293,7 +363,11 @@ function App() {
     return () => {
       cancelled = true;
     };
-  }, [selectedEntryHydrationRefreshKey, selectedEntryId, sourceFilesRequestRevision]);
+  }, [
+    selectedEntryHydrationRefreshKey,
+    selectedSourceFilesRequest,
+    sourceFilesRequestRevision,
+  ]);
 
   useEffect(() => {
     if (!hasOpenModal) {
@@ -322,48 +396,74 @@ function App() {
     }
   }
 
-  async function handleConfigUpdated() {
-    const nextState = await refreshState();
-    if (!nextState) {
-      return;
-    }
-
-    const selectedEntryId = selectedEntryIdRef.current;
-    if (!selectedEntryId) {
-      toast.success("Config updated");
-      return;
-    }
-
-    const selectedEntryStillExists = nextState.entries.some(
-      (entry) => entry.id === selectedEntryId,
-    );
-    if (selectedEntryStillExists) {
-      toast.success("Config updated");
-      return;
-    }
-
-    setSelectedEntryId(null);
-    toast.success("Selected source changed, returned to source list");
+  function applyReloadedState(nextState: SimulatorState) {
+    setState(nextState);
+    setSessionEditableState(nextState.status === "editable" ? nextState.editable : null);
+    setSelectedSourceRef(null);
+    setSelectedSourceFiles(null);
+    setSavePreparation(null);
   }
 
-  async function loadSourceFiles(entryId: string) {
-    const response = await fetch(
-      `/__simulator/source-files?entryId=${encodeURIComponent(entryId)}`,
-    );
+  function handleConfigUpdated() {
+    if (pendingLocalConfigUpdateCountRef.current > 0) {
+      pendingLocalConfigUpdateCountRef.current -= 1;
+      return;
+    }
+    if (!documentSession) {
+      void refreshState();
+      return;
+    }
+    setShowExternalReloadModal(true);
+  }
+
+  async function reloadFromDisk() {
+    const nextState = await refreshState();
+    if (!nextState) {
+      toast.error("Could not reload source.json");
+      return;
+    }
+    applyReloadedState(nextState);
+    setShowManualReloadModal(false);
+    setShowExternalReloadModal(false);
+    toast.success("Reloaded source.json from disk");
+  }
+
+  async function loadSourceFiles(request: SourceFilesRequest) {
+    const response = await fetch("/__simulator/source-files", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(request),
+    });
     if (!response.ok) {
       throw new Error("Source files could not be loaded");
     }
     return (await response.json()) as SourceFilesState;
   }
 
-  async function startHydration() {
-    await requestHydration(state.entries.map((entry) => entry.id), false);
+  function openHydrationModal() {
+    setHydrationMode("missing");
+    setHydrationRequestError(null);
+    setShowHydrationModal(true);
   }
 
-  async function requestHydration(
-    entryIds: string[],
-    forceRefresh: boolean,
+  function buildHydrationRequestPayload(
+    mode: HydrationMode,
+    snapshot: SimulatorState,
   ) {
+    return mode === "all"
+      ? {
+          entryIds: snapshot.entries.map((entry) => entry.id),
+          forceRefresh: true,
+        }
+      : {
+          entryIds: snapshot.hydration.missingSourceIds,
+          forceRefresh: false,
+        };
+  }
+
+  async function requestHydrationJob(entryIds: string[], forceRefresh: boolean) {
     setHydrationRequestError(null);
     try {
       const response = await fetch("/__simulator/hydrate", {
@@ -381,23 +481,33 @@ function App() {
         throw new Error(payload.error ?? "The update could not be started");
       }
       setShowHydrationModal(false);
+      setShowRefreshDraftConflictModal(false);
+      setShowLogModal(true);
       await refreshState();
+      return true;
     } catch (error) {
       setHydrationRequestError(
         error instanceof Error ? error.message : "The update could not be started",
       );
+      return false;
     }
   }
 
-  async function refreshSelectedSource() {
-    if (!selectedEntry) {
+  async function requestHydration(
+    mode: HydrationMode,
+    snapshot: SimulatorState = state,
+  ) {
+    const { entryIds, forceRefresh } = buildHydrationRequestPayload(mode, snapshot);
+    return requestHydrationJob(entryIds, forceRefresh);
+  }
+
+  async function startHydrationFlow() {
+    if (sourceListController.dirty) {
+      setShowHydrationModal(false);
+      setShowRefreshDraftConflictModal(true);
       return;
     }
-    const forceRefresh = shouldForceSourceRefresh(
-      selectedEntry.scope.isArchiveSelection,
-      selectedEntryHydrationState?.status,
-    );
-    await requestHydration([selectedEntry.id], forceRefresh);
+    await requestHydration(hydrationMode);
   }
 
   async function savePreviewFixture(
@@ -406,8 +516,7 @@ function App() {
     if (!selectedEntry || !selectedSourceFiles) {
       return;
     }
-    const requestEntryId = selectedEntry.id;
-    const requestKey = `${requestEntryId}:${nextFixture.fixtureKey}`;
+    const requestKey = `${selectedEntry.hydrationKey}:${nextFixture.fixtureKey}`;
     const requestRevision = beginEntryRequest(
       previewFixtureSaveRevisionRef.current,
       requestKey,
@@ -420,7 +529,7 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          entryId: requestEntryId,
+          hydrationKey: selectedEntry.hydrationKey,
           fixtureKey: nextFixture.fixtureKey,
           sourceFileId: nextFixture.sourceFileId,
           archiveDisplayName: nextFixture.archiveDisplayName,
@@ -443,7 +552,7 @@ function App() {
         return;
       }
       setSelectedSourceFiles((current) =>
-        updateSourceFilesForEntry(current, requestEntryId, (matchingSourceFiles) => ({
+        updateSourceFilesForEntry(current, selectedEntry, (matchingSourceFiles) => ({
           ...matchingSourceFiles,
           previewFixtures: upsertPreviewFixture(
             matchingSourceFiles.previewFixtures,
@@ -472,8 +581,7 @@ function App() {
       throw new Error("No source is selected");
     }
 
-    const requestEntryId = selectedEntry.id;
-    const requestKey = `${requestEntryId}:archive-sample-extensions`;
+    const requestKey = `${selectedEntry.selectionStateKey}:archive-sample-extensions`;
     const requestRevision = beginEntryRequest(
       archivePatternSaveRevisionRef.current,
       requestKey,
@@ -485,7 +593,8 @@ function App() {
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        entryId: requestEntryId,
+        selectionStateKey: selectedEntry.selectionStateKey,
+        unarchiveEnabled: selectedEntry.unarchive !== null,
         fileExtensions,
       }),
     });
@@ -494,7 +603,7 @@ function App() {
       fileExtensions?: string[];
     };
     if (!response.ok) {
-      throw new Error(payload.error ?? "The unarchived file pattern could not be saved");
+      throw new Error(payload.error ?? "Sample File Extensions could not be saved");
     }
     if (
       !isLatestEntryRequest(
@@ -507,7 +616,7 @@ function App() {
     }
 
     setSelectedSourceFiles((current) =>
-      updateSourceFilesForEntry(current, requestEntryId, (matchingSourceFiles) => ({
+      updateSourceFilesForEntry(current, selectedEntry, (matchingSourceFiles) => ({
         ...matchingSourceFiles,
         archiveSampleExtensions: payload.fileExtensions ?? [],
       })),
@@ -515,41 +624,55 @@ function App() {
   }
 
   async function submitArchivePattern() {
-    const nextFileExtensions = parseArchiveSampleExtensionsInput(archivePatternDraft);
-    if (nextFileExtensions.length === 0) {
-      setArchivePatternError("Enter at least one file extension.");
+    if (!archivePatternValidation.canSave) {
+      setArchivePatternError(
+        archivePatternValidation.error ?? "Enter at least one file extension.",
+      );
       return;
     }
 
     setSavingArchivePattern(true);
     setArchivePatternError(null);
     try {
-      await saveArchiveSampleExtensions(nextFileExtensions);
+      await saveArchiveSampleExtensions(archivePatternValidation.fileExtensions);
+      toast.success("Sample File Extensions saved");
+      setArchivePatternPromptMode(null);
       setShowArchivePatternModal(false);
     } catch (error) {
+      console.error(error);
+      toast.error("Could not save Sample File Extensions. Check the console for details.");
       setArchivePatternError(
         error instanceof Error
           ? error.message
-          : "The unarchived file pattern could not be saved",
+          : "Sample File Extensions could not be saved",
       );
     } finally {
       setSavingArchivePattern(false);
     }
   }
 
+  function closeArchivePatternModal() {
+    const promptMode = archivePatternPromptMode;
+    setShowArchivePatternModal(false);
+    setArchivePatternPromptMode(null);
+    if (promptMode === "auto") {
+      setSelectedSourceRef(null);
+    }
+  }
+
   async function saveSelectedRowIds(nextSelectedRowIds: string[]) {
-    if (!selectedEntry || !selectedSourceFiles) {
+    if (!selectedEntry || !selectedSourceFiles || !selectedSourceFilesRequest) {
       return;
     }
-    const requestEntryId = selectedEntry.id;
+    const requestKey = selectedEntry.selectionStateKey;
     const requestRevision = beginEntryRequest(
       selectedFileSaveRevisionRef.current,
-      requestEntryId,
+      requestKey,
     );
 
     const previousSelectedRowIds = selectedSourceFiles.selectedRowIds ?? [];
     setSelectedSourceFiles((current) =>
-      updateSourceFilesForEntry(current, requestEntryId, (matchingSourceFiles) => ({
+      updateSourceFilesForEntry(current, selectedEntry, (matchingSourceFiles) => ({
         ...matchingSourceFiles,
         selectedRowIds: nextSelectedRowIds,
       })),
@@ -562,7 +685,7 @@ function App() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          entryId: requestEntryId,
+          source: selectedSourceFilesRequest,
           selectedRowIds: nextSelectedRowIds,
         }),
       });
@@ -574,14 +697,14 @@ function App() {
       if (
         !isLatestEntryRequest(
           selectedFileSaveRevisionRef.current,
-          requestEntryId,
+          requestKey,
           requestRevision,
         )
       ) {
         return;
       }
       setSelectedSourceFiles((current) =>
-        updateSourceFilesForEntry(current, requestEntryId, (matchingSourceFiles) => ({
+        updateSourceFilesForEntry(current, selectedEntry, (matchingSourceFiles) => ({
           ...matchingSourceFiles,
           selectedRowIds: payload.selectedRowIds ?? [],
         })),
@@ -590,14 +713,14 @@ function App() {
       if (
         !isLatestEntryRequest(
           selectedFileSaveRevisionRef.current,
-          requestEntryId,
+          requestKey,
           requestRevision,
         )
       ) {
         return;
       }
       setSelectedSourceFiles((current) =>
-        updateSourceFilesForEntry(current, requestEntryId, (matchingSourceFiles) => ({
+        updateSourceFilesForEntry(current, selectedEntry, (matchingSourceFiles) => ({
           ...matchingSourceFiles,
           selectedRowIds: previousSelectedRowIds,
         })),
@@ -606,6 +729,189 @@ function App() {
         error instanceof Error ? error.message : "Selected files could not be saved",
       );
     }
+  }
+
+  function handleSourceRowOpen(entryId: string, displayName: string) {
+    const result = sourceListController.openSource(entryId);
+    if (result.status === "opened") {
+      setSelectedSourceRef(result.sourceRef);
+      return;
+    }
+    if (result.status === "missing-cache") {
+      setMissingCacheSourceName(displayName);
+      return;
+    }
+    toast.error("That source is no longer available");
+  }
+
+  function closeSaveConfirmation() {
+    if (savingSourceDocument) {
+      return;
+    }
+    setSavePreparation(null);
+    if (reopenHydrationOnSaveCancel) {
+      setShowHydrationModal(true);
+    }
+    setPendingRefreshAfterSave(null);
+    setReopenHydrationOnSaveCancel(false);
+  }
+
+  function openSaveConfirmation(options?: {
+    pendingRefreshMode?: HydrationMode;
+    reopenHydrationOnCancel?: boolean;
+  }) {
+    const nextSavePreparation = sourceListController.prepareSavePreview(state.schemaPath);
+    if (!nextSavePreparation) {
+      if (options?.reopenHydrationOnCancel) {
+        setShowHydrationModal(true);
+      }
+      return;
+    }
+    if (nextSavePreparation.status !== "ready") {
+      console.error("Save Changes was blocked", nextSavePreparation.blockers);
+      if (
+        nextSavePreparation.blockers.some(
+          (blocker) => blocker.code === "repairable-validation",
+        )
+      ) {
+        toast.error(
+          "Save Changes is blocked by draft validation issues. Fix the highlighted source rules and check the browser console for details.",
+        );
+        if (options?.reopenHydrationOnCancel) {
+          setShowHydrationModal(true);
+        }
+        return;
+      }
+      toast.error(
+        nextSavePreparation.blockers[0]?.message ?? "Save Changes is blocked right now",
+      );
+      if (options?.reopenHydrationOnCancel) {
+        setShowHydrationModal(true);
+      }
+      return;
+    }
+    setPendingRefreshAfterSave(options?.pendingRefreshMode ?? null);
+    setReopenHydrationOnSaveCancel(options?.reopenHydrationOnCancel ?? false);
+    setSavePreparation(nextSavePreparation);
+  }
+
+  async function saveSourceDocument() {
+    if (!savePreparation) {
+      return;
+    }
+
+    setSavingSourceDocument(true);
+    pendingLocalConfigUpdateCountRef.current = 1;
+    try {
+      const response = await fetch("/__simulator/save-document", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          preview: {
+            checksum: savePreparation.preview.checksum,
+            text: savePreparation.preview.text,
+          },
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "source.json could not be saved");
+      }
+
+      const refreshModeAfterSave = pendingRefreshAfterSave;
+      sourceListController.commitSave(savePreparation.preview.document);
+      const nextState = await refreshState();
+      if (!nextState) {
+        setState((current) =>
+          current.status !== "editable"
+            ? current
+            : {
+                ...current,
+                diskFingerprint: savePreparation.preview.checksum,
+                editable: {
+                  sourceDocument: savePreparation.preview.document,
+                  validation: savePreparation.validation,
+                },
+                entries: buildPreviewEntries(savePreparation.preview.document),
+              },
+        );
+      }
+      setSavePreparation(null);
+      setPendingRefreshAfterSave(null);
+      setReopenHydrationOnSaveCancel(false);
+      toast.success("Changes saved to source.json");
+      if (refreshModeAfterSave) {
+        if (!nextState) {
+          setHydrationRequestError(
+            "Changes were saved, but the simulator could not refresh its current state. Open Update Database and try again.",
+          );
+          setShowHydrationModal(true);
+        } else {
+          const started = await requestHydration(refreshModeAfterSave, nextState);
+          if (!started) {
+            setShowHydrationModal(true);
+          }
+        }
+      }
+      setTimeout(() => {
+        pendingLocalConfigUpdateCountRef.current = 0;
+      }, 1_000);
+    } catch (error) {
+      pendingLocalConfigUpdateCountRef.current = 0;
+      console.error(error);
+      toast.error("Could not save changes. Check the console for details.");
+    } finally {
+      setSavingSourceDocument(false);
+    }
+  }
+
+  async function clearDatabase() {
+    if (clearDatabaseSelectionCount === 0) {
+      return;
+    }
+
+    const selection = clearDatabaseSelection;
+    setShowClearDatabaseConfirmModal(false);
+    setShowClearDatabaseModal(false);
+    setClearingDatabase(true);
+    setClearDatabaseSelection(EMPTY_CLEAR_DATABASE_SELECTION);
+
+    try {
+      const response = await fetch("/__simulator/clear-data", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          selection,
+        }),
+      });
+      const payload = (await response.json()) as { error?: string };
+      if (!response.ok) {
+        throw new Error(payload.error ?? "The local database data could not be cleared");
+      }
+
+      if (selection.updateLogs && !state.hydration.running) {
+        setShowLogModal(false);
+      }
+      await refreshState();
+      toast.success("Local database data cleared.");
+    } catch (error) {
+      console.error(error);
+      toast.error("Could not clear local database data. Check the console for details.");
+    } finally {
+      setClearingDatabase(false);
+    }
+  }
+
+  function requestManualReload() {
+    if (sourceListController.dirty) {
+      setShowManualReloadModal(true);
+      return;
+    }
+    void reloadFromDisk();
   }
 
   return (
@@ -623,14 +929,23 @@ function App() {
           </p>
         </div>
         <div className="hero-actions">
-          <button
-            type="button"
-            className="primary-button"
-            onClick={() => setShowHydrationModal(true)}
-            disabled={state.entries.length === 0 || state.hydration.running}
+          <div
+            className={`config-status-inline${configStatusInvalid ? " is-invalid" : " is-valid"}`}
           >
-            {state.hydration.running ? "Updating Database..." : "Update Database"}
-          </button>
+            <span className="config-status-dot" aria-hidden="true" />
+            <span>{configStatusLabel}</span>
+          </div>
+          {state.status === "blocked" ? (
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                requestManualReload();
+              }}
+            >
+              Reload source.json
+            </button>
+          ) : null}
           <div className="hero-meta-inline">
             <span>Last updated</span>
             <strong>
@@ -639,107 +954,162 @@ function App() {
                 : "Never"}
             </strong>
           </div>
-          {state.hydration.running || state.hydration.logs.length > 0 ? (
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setShowLogModal(true)}
-            >
-              View Logs
-            </button>
-          ) : null}
         </div>
       </section>
 
-      <article className="panel">
-        <div className="validation-header">
-          <div>
-            <h2>Config Validation</h2>
-            <p>
-              Status:{" "}
-              <strong>{state.status === "accepted" ? "Accepted" : "Error"}</strong>
-            </p>
-          </div>
-          <button
-            type="button"
-            className="ghost-button"
-            onClick={() => setShowConfigDetails((value) => !value)}
-          >
-            {showConfigDetails ? "Hide details" : "Show details"}
-          </button>
-        </div>
-
-        {showConfigDetails ? (
-          <dl className="details-grid">
-            <DetailRow label="Config" value={state.configPath} />
-            <DetailRow label="Schema" value={state.schemaPath} />
-          </dl>
-        ) : null}
-
-        {state.issues.length > 0 ? (
-          <div className="error-box">
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setShowErrorDetails((value) => !value)}
-            >
-              {showErrorDetails ? "Hide errors" : "Show errors"}
-            </button>
-            {showErrorDetails ? (
-              <ul className="issue-list">
-                {state.issues.map((issue) => (
-                  <li key={`${issue.kind}-${issue.message}`}>
-                    <span className="issue-kind">{issue.kind}</span>
-                    <span>{issue.message}</span>
-                  </li>
-                ))}
-              </ul>
-            ) : null}
-          </div>
-        ) : null}
-      </article>
-
       {!selectedEntry ? (
         <section className="source-list-section">
-          {state.entries.length === 0 ? (
-            <EmptyState
-              title="No sources to preview yet"
-              body="Fix the config issues above, or add at least one source entry to source.json."
-            />
-          ) : (
-            <div className="source-list">
-              {state.entries.map((entry) => {
-                const sourceState = state.hydration.sourceStates[entry.id];
-                return (
-                  <div key={entry.id} className="source-row">
+          {state.status === "editable" ? (
+            <>
+              <div className="source-list-toolbar">
+                <div className="source-list-toolbar-group">
+                  <button
+                    type="button"
+                    className="primary-button"
+                    onClick={() => {
+                      openSaveConfirmation();
+                    }}
+                    disabled={!sourceListController.dirty || state.hydration.running}
+                  >
+                    Save Changes
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={sourceListController.undo}
+                    disabled={!sourceListController.canUndo || state.hydration.running}
+                  >
+                    Undo
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={sourceListController.redo}
+                    disabled={!sourceListController.canRedo || state.hydration.running}
+                  >
+                    Redo
+                  </button>
+                </div>
+                <div className="source-list-toolbar-group source-list-toolbar-group-right">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={requestManualReload}
+                    disabled={state.hydration.running}
+                  >
+                    Reload source.json
+                  </button>
+                  <div className="toolbar-menu" ref={databaseMenuRef}>
                     <button
                       type="button"
-                      className="source-select"
-                      onClick={() => setSelectedEntryId(entry.id)}
+                      className="ghost-button toolbar-menu-button"
+                      aria-expanded={showDatabaseMenu}
+                      onClick={() => setShowDatabaseMenu((current) => !current)}
                     >
-                      <div>
-                        <strong>{entry.displayName}</strong>
-                        <p>{entry.subfolder}</p>
-                      </div>
-                      <div className="source-meta">
-                        <span>{entry.scope.isArchiveSelection ? "ZIP source" : "Folder source"}</span>
-                        <small className={`source-status ${sourceState?.status ?? "missing"}`}>
-                          {formatSourceStatus(sourceState?.status ?? "missing")}
-                        </small>
-                      </div>
+                      Manage database ▾
                     </button>
-                    <button
-                      type="button"
-                      className="info-button"
-                      onClick={() => setInfoEntryId(entry.id)}
-                      aria-label={`Show info for ${entry.displayName}`}
-                    >
-                      i
-                    </button>
+                    {showDatabaseMenu ? (
+                      <div className="toolbar-menu-popover">
+                        <button
+                          type="button"
+                          className="toolbar-menu-item"
+                          onClick={() => {
+                            setShowDatabaseMenu(false);
+                            openHydrationModal();
+                          }}
+                          disabled={state.entries.length === 0 || state.hydration.running}
+                        >
+                          Refresh Database
+                        </button>
+                        <button
+                          type="button"
+                          className="toolbar-menu-item"
+                          onClick={() => {
+                            setShowDatabaseMenu(false);
+                            setShowLogModal(true);
+                          }}
+                          disabled={!hasHydrationLogs || (state.hydration.running && showLogModal)}
+                        >
+                          View Logs
+                        </button>
+                        <button
+                          type="button"
+                          className="toolbar-menu-item"
+                          onClick={() => {
+                            setShowDatabaseMenu(false);
+                            setShowClearDatabaseModal(true);
+                          }}
+                          disabled={state.hydration.running || clearingDatabase}
+                        >
+                          Clear Database
+                        </button>
+                      </div>
+                    ) : null}
                   </div>
-                );
-              })}
-            </div>
+                </div>
+              </div>
+              <div className="source-list-status-line">
+                <span>{sourceCountLabel}</span>
+                <span>{draftStatusLabel}</span>
+              </div>
+            </>
+          ) : null}
+          {state.status === "blocked" ? (
+            <BlockedDocumentPanel
+              groups={state.blocked.groups}
+              onReload={() => {
+                requestManualReload();
+              }}
+            />
+          ) : sourceListController.rows.length === 0 ? (
+            <article className="panel">
+              <EmptyState
+                title="No sources yet"
+                body="Add a source to start editing source.json."
+              />
+              <div className="source-list-footer">
+                <button
+                  type="button"
+                  className="source-list-add-button"
+                  onClick={sourceListController.openCreateSourceModal}
+                  disabled={state.hydration.running}
+                >
+                  + Add source
+                </button>
+              </div>
+            </article>
+          ) : (
+            <>
+              <div className="source-list">
+                {sourceListController.rows.map((row) => (
+                  <SourceListRowCard
+                    key={row.ref}
+                    row={row}
+                    rowOrder={sourceListRowOrder}
+                    disabled={state.hydration.running}
+                    onOpen={() => {
+                      handleSourceRowOpen(row.entry.id, row.entry.displayName);
+                    }}
+                    onEdit={() => sourceListController.openEditSourceModal(row.ref)}
+                    onDelete={() => sourceListController.requestDeleteSource(row.ref)}
+                    onInfo={() => setInfoEntryId(row.entry.id)}
+                    onMove={(sourceRef, targetIndex) => {
+                      sourceListController.moveSource(sourceRef, targetIndex);
+                    }}
+                  />
+                ))}
+              </div>
+              <div className="source-list-footer">
+                <button
+                  type="button"
+                  className="source-list-add-button"
+                  onClick={sourceListController.openCreateSourceModal}
+                  disabled={state.hydration.running}
+                >
+                  + Add source
+                </button>
+              </div>
+            </>
           )}
         </section>
       ) : null}
@@ -750,7 +1120,7 @@ function App() {
             <button
               type="button"
               className="ghost-button"
-              onClick={() => setSelectedEntryId(null)}
+              onClick={() => setSelectedSourceRef(null)}
             >
               Back to sources
             </button>
@@ -760,30 +1130,50 @@ function App() {
             </div>
           </div>
 
+          <article className="panel disclosure-panel">
+            <details className="section-disclosure">
+              <summary className="section-disclosure-summary">
+                <PanelTitle
+                  title="Source Info"
+                  subtitle="Read-only source definition details for the current editor session"
+                />
+                <span className="disclosure-chip">Show details</span>
+              </summary>
+              <div className="section-disclosure-body">
+                <dl className="details-grid">
+                  <DetailRow label="Display Name" value={selectedEntry.displayName} />
+                  <DetailRow label="Subfolder" value={selectedEntry.subfolder} />
+                  <DetailRow label="Path" value={selectedEntry.scope.normalizedPath} />
+                  <DetailRow
+                    label="Mode"
+                    value={selectedEntry.scope.isArchiveSelection ? "ZIP source" : "Folder source"}
+                  />
+                  <DetailRow
+                    label="Torrent Links"
+                    value={String(selectedEntry.torrents.length)}
+                  />
+                </dl>
+              </div>
+            </details>
+          </article>
+
           <section className="workbench-layout">
             <article className="panel workbench-panel">
               <div className="panel-title-row">
                 <PanelTitle
-                  title="Files List Preview"
+                  title="Files List"
                   subtitle="Preview the files you want Romulus to show for this source"
                 />
-                <button
-                  type="button"
-                  className="ghost-button"
-                  disabled={state.hydration.running || !state.hydration.apiKeyConfigured}
-                  onClick={() => {
-                    void refreshSelectedSource();
-                  }}
-                >
-                  Refresh Source
-                </button>
               </div>
               <div className="panel-scroll-body">
                 <FilesPanel
-                  entry={effectiveEntry ?? selectedEntry}
-                  sourceFiles={effectiveSourceFiles}
+                  sourceFiles={visibleSourceFiles}
                   errorMessage={sourceFilesRequestError}
                   selectedRowIds={selectedRowIds}
+                  baseFileCount={effectiveSourceFiles?.files.length ?? 0}
+                  searchText={sourceEditorController.fileSearchText}
+                  showSearch={sourceEditorController.showFileSearch}
+                  onSearchChange={sourceEditorController.setFileSearchText}
                   onRetry={() => {
                     setSourceFilesRequestRevision((current) => current + 1);
                   }}
@@ -805,7 +1195,7 @@ function App() {
                   title="Download Folder Preview"
                   subtitle="Preview where the selected files would end up after your current rules are applied"
                 />
-                {selectedEntry.unarchive ? (
+                {selectedEntry.unarchive && sourceEditorController.unarchiveRelevant ? (
                   <div className="preview-pattern-toolbar">
                     <button
                       type="button"
@@ -815,17 +1205,18 @@ function App() {
                           formatArchiveSampleExtensions(archiveSampleExtensions),
                         );
                         setArchivePatternError(null);
+                        setArchivePatternPromptMode("manual");
                         setShowArchivePatternModal(true);
                       }}
                     >
-                      Edit pattern
+                      Edit Sample File Extensions
                     </button>
                   </div>
                 ) : null}
               </div>
               <div className="panel-scroll-body">
                 <DownloadPreviewPanel
-                  entry={effectiveEntry ?? selectedEntry}
+                  entry={selectedEntry}
                   selectedRows={selectedActualRows}
                   sourceFiles={effectiveSourceFiles}
                   archiveFixtures={downloadPreview.archiveFixtures}
@@ -840,55 +1231,52 @@ function App() {
                 <div
                   className="preview-panel-overlay"
                   role="presentation"
-                  onClick={() => setShowArchivePatternModal(false)}
+                  onClick={closeArchivePatternModal}
                 >
                   <div
                     className="preview-panel-modal"
                     role="dialog"
                     aria-modal="true"
-                    aria-label="Unarchived File Pattern"
+                    aria-label="Sample File Extensions"
                     onClick={(event) => event.stopPropagation()}
                   >
                     <div className="modal-header">
-                      <h2>Unarchived File Pattern</h2>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => setShowArchivePatternModal(false)}
-                      >
-                        Close
-                      </button>
+                      <h2>Sample File Extensions</h2>
                     </div>
                     <div className="modal-body">
                       <div className="modal-copy">
-                        <strong>{selectedEntry.displayName}</strong>
                         <p>
-                          Enter the expected extracted file extensions for archives in this source,
-                          separated by commas.
+                          This source is configured to extract files from an archive. Enter
+                          the expected file extensions to populate the download preview.
                         </p>
                       </div>
                       <div className="field-stack">
                         <label className="field">
-                          <span>File extensions</span>
+                          <span>Sample File Extensions</span>
                           <input
                             type="text"
                             value={archivePatternDraft}
-                            onChange={(event) => setArchivePatternDraft(event.target.value)}
+                            onChange={(event) => {
+                              setArchivePatternDraft(event.target.value);
+                              setArchivePatternError(null);
+                            }}
                             placeholder=".cue, .bin"
                           />
                         </label>
-                        {archivePatternError ? (
-                          <div className="inline-error">{archivePatternError}</div>
+                        {(archivePatternError ?? archivePatternValidation.error) ? (
+                          <div className="inline-error">
+                            {archivePatternError ?? archivePatternValidation.error}
+                          </div>
                         ) : null}
                       </div>
                       <div className="modal-actions">
                         <button
                           type="button"
                           className="ghost-button"
-                          onClick={() => setShowArchivePatternModal(false)}
+                          onClick={closeArchivePatternModal}
                           disabled={savingArchivePattern}
                         >
-                          Not now
+                          Cancel
                         </button>
                         <button
                           type="button"
@@ -896,9 +1284,9 @@ function App() {
                           onClick={() => {
                             void submitArchivePattern();
                           }}
-                          disabled={savingArchivePattern}
+                          disabled={savingArchivePattern || !archivePatternValidation.canSave}
                         >
-                          Save pattern
+                          Save
                         </button>
                       </div>
                     </div>
@@ -909,9 +1297,7 @@ function App() {
           </section>
 
           <SourcePolicyWorkbench
-            entry={selectedEntry}
-            sourceFiles={selectedEntrySourceFiles}
-            onDraftStateChange={setSourcePolicyDraft}
+            controller={sourceEditorController}
           />
         </>
       ) : null}
@@ -965,25 +1351,43 @@ function App() {
             setShowHydrationModal(false);
             setHydrationRequestError(null);
           }}
+          showHeaderClose={false}
         >
           {!state.hydration.apiKeyConfigured ? (
             <p>
               Add your <code>REAL_DEBRID_API_KEY</code> to <code>simulator/.env.local</code>
               before loading file lists.
             </p>
-          ) : missingSourceNames.length > 0 ? (
-            <>
-              <p>
-                These sources have not been loaded into the local database yet:
-              </p>
-              <ul className="plain-list">
-                {missingSourceNames.map((name) => (
-                  <li key={name}>{name}</li>
-                ))}
-              </ul>
-            </>
           ) : (
-            <p>All sources already have saved file lists. Run this again to refresh them.</p>
+            <div className="field-stack">
+              <p>Choose how much local cache to update.</p>
+              <label className="field">
+                <span>
+                  <input
+                    type="radio"
+                    name="hydration-mode"
+                    checked={hydrationMode === "missing"}
+                    onChange={() => setHydrationMode("missing")}
+                  />
+                  {" "}
+                  Only Load Missing Cache
+                </span>
+                <small>Loads file cache only for sources that do not already have local cache.</small>
+              </label>
+              <label className="field">
+                <span>
+                  <input
+                    type="radio"
+                    name="hydration-mode"
+                    checked={hydrationMode === "all"}
+                    onChange={() => setHydrationMode("all")}
+                  />
+                  {" "}
+                  Refresh All Cache
+                </span>
+                <small>Rebuilds file cache for every source, even when local cache already exists.</small>
+              </label>
+            </div>
           )}
           {hydrationRequestError ? (
             <div className="inline-error">{hydrationRequestError}</div>
@@ -1002,12 +1406,552 @@ function App() {
             <button
               type="button"
               className="primary-button"
-              disabled={!state.hydration.apiKeyConfigured || state.hydration.running}
+              disabled={!canStartHydration}
+              title={
+                hydrationMode === "missing" && !canStartMissingCacheRefresh
+                  ? "No Missing Cache"
+                  : undefined
+              }
               onClick={() => {
-                void startHydration();
+                void startHydrationFlow();
               }}
             >
               Start Update
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showRefreshDraftConflictModal ? (
+        <Modal
+          title="Unsaved changes detected"
+          onClose={() => {
+            setShowRefreshDraftConflictModal(false);
+            setShowHydrationModal(true);
+          }}
+        >
+          <p>
+            Refresh Database always runs against the saved <code>source.json</code> on
+            disk. Save the current draft first, or continue using <code>source.json</code> on
+            disk.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => {
+                setShowRefreshDraftConflictModal(false);
+                openSaveConfirmation({
+                  pendingRefreshMode: hydrationMode,
+                  reopenHydrationOnCancel: true,
+                });
+              }}
+            >
+              Save now
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                void (async () => {
+                  const started = await requestHydration(hydrationMode);
+                  if (!started) {
+                    setShowHydrationModal(true);
+                  }
+                })();
+              }}
+            >
+              Use source.json on disk
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {structureModal && structureValidation ? (
+        <Modal
+          title={
+            structureModal.mode === "create"
+              ? "Create Source"
+              : "Update Source"
+          }
+          onClose={sourceListController.closeStructureModal}
+          showHeaderClose={false}
+        >
+          <div className="field-stack">
+            <label className="field">
+              <span>Display name</span>
+              <input
+                type="text"
+                value={structureModal.draft.displayName}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  sourceListController.updateStructureDraft((current) => ({
+                    ...current,
+                    displayName: nextValue,
+                  }));
+                }}
+              />
+              {structureValidation.displayNameError ? (
+                <span className="inline-error">
+                  {structureValidation.displayNameError}
+                </span>
+              ) : null}
+            </label>
+            <label className="field">
+              <span>Subfolder</span>
+              <input
+                type="text"
+                value={structureModal.draft.subfolder}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  sourceListController.updateStructureDraft((current) => ({
+                    ...current,
+                    subfolder: nextValue,
+                  }));
+                }}
+              />
+              {structureValidation.subfolderError ? (
+                <span className="inline-error">
+                  {structureValidation.subfolderError}
+                </span>
+              ) : null}
+            </label>
+            <label className="field">
+              <span>Path</span>
+              <input
+                type="text"
+                value={structureModal.draft.scopePath}
+                onChange={(event) => {
+                  const nextValue = event.target.value;
+                  sourceListController.updateStructureDraft((current) => ({
+                    ...current,
+                    scopePath: nextValue,
+                  }));
+                }}
+                placeholder="/ or /ROMs/Game.zip"
+              />
+              {structureValidation.scopePathError ? (
+                <span className="inline-error">
+                  {structureValidation.scopePathError}
+                </span>
+              ) : null}
+            </label>
+            {structureModal.draft.torrents.map((torrent, index) => (
+              <div key={index} className="field-stack">
+                <label className="field">
+                  <span>{`Magnet URL ${index + 1}`}</span>
+                  <input
+                    type="text"
+                    value={torrent.url}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      sourceListController.updateStructureDraft((current) => ({
+                        ...current,
+                        torrents: current.torrents.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? {
+                                ...candidate,
+                                url: nextValue,
+                              }
+                            : candidate,
+                        ),
+                      }));
+                    }}
+                  />
+                  {structureValidation.torrentErrors[index]?.urlError ? (
+                    <span className="inline-error">
+                      {structureValidation.torrentErrors[index]?.urlError}
+                    </span>
+                  ) : null}
+                </label>
+                <label className="field">
+                  <span>{`Part name ${index + 1}`}</span>
+                  <input
+                    type="text"
+                    value={torrent.partName}
+                    onChange={(event) => {
+                      const nextValue = event.target.value;
+                      sourceListController.updateStructureDraft((current) => ({
+                        ...current,
+                        torrents: current.torrents.map((candidate, candidateIndex) =>
+                          candidateIndex === index
+                            ? {
+                                ...candidate,
+                                partName: nextValue,
+                              }
+                            : candidate,
+                        ),
+                      }));
+                    }}
+                  />
+                  {structureValidation.torrentErrors[index]?.partNameError ? (
+                    <span className="inline-error">
+                      {structureValidation.torrentErrors[index]?.partNameError}
+                    </span>
+                  ) : null}
+                </label>
+                <div className="policy-actions-row">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      sourceListController.updateStructureDraft((current) => ({
+                        ...current,
+                        torrents:
+                          current.torrents.length === 1
+                            ? current.torrents
+                            : current.torrents.filter(
+                                (_candidate, candidateIndex) => candidateIndex !== index,
+                              ),
+                      }));
+                    }}
+                    disabled={structureModal.draft.torrents.length <= 1}
+                  >
+                    Remove Torrent
+                  </button>
+                </div>
+              </div>
+            ))}
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => {
+                sourceListController.updateStructureDraft((current) => ({
+                  ...current,
+                  torrents: [
+                    ...current.torrents,
+                    {
+                      url: "",
+                      partName: "",
+                    },
+                  ],
+                }));
+              }}
+            >
+              Add Torrent
+            </button>
+            {structureValidation.duplicateError ? (
+              <div className="inline-error">
+                {structureValidation.duplicateError}
+              </div>
+            ) : null}
+          </div>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={sourceListController.closeStructureModal}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              disabled={!structureValidation.valid}
+              onClick={() => {
+                sourceListController.confirmStructureModal();
+              }}
+            >
+              {structureModal.mode === "create"
+                ? "Create Source"
+                : "Update Source"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {deleteSource ? (
+        <Modal
+          title="Delete Source"
+          onClose={sourceListController.cancelDeleteSource}
+          showHeaderClose={false}
+        >
+          <p>
+            Delete <strong>{deleteSource.entry.displayName}</strong> from the current draft?
+            This does not persist to source.json until you save.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={sourceListController.cancelDeleteSource}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button danger-button"
+              onClick={() => {
+                sourceListController.confirmDeleteSource();
+              }}
+            >
+              Delete Source
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {savePreparation ? (
+        <Modal
+          title="Save Changes"
+          onClose={closeSaveConfirmation}
+          showHeaderClose={false}
+        >
+          <p>
+            Save the current draft into <code>source.json</code>.
+          </p>
+          <details>
+            <summary>Preview source.json</summary>
+            <pre>{savePreparation.preview.text}</pre>
+          </details>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={closeSaveConfirmation}
+              disabled={savingSourceDocument}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                void saveSourceDocument();
+              }}
+              disabled={savingSourceDocument}
+            >
+              {savingSourceDocument ? "Saving..." : "Save Changes"}
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showClearDatabaseModal ? (
+        <Modal
+          title="Clear Database"
+          onClose={() => {
+            if (!clearingDatabase) {
+              setShowClearDatabaseModal(false);
+              setClearDatabaseSelection(EMPTY_CLEAR_DATABASE_SELECTION);
+            }
+          }}
+          showHeaderClose={false}
+        >
+          <p>
+            Choose what to remove from the local database. This only affects cached
+            local editor data and does not modify source.json.
+          </p>
+          <div className="field-stack">
+            <label className="field">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={clearDatabaseSelection.fileCache}
+                  onChange={(event) =>
+                    setClearDatabaseSelection((current) => ({
+                      ...current,
+                      fileCache: event.target.checked,
+                    }))
+                  }
+                />
+                {" "}
+                File Cache
+              </span>
+              <small>Removes cached file lists downloaded for your sources.</small>
+            </label>
+            <label className="field">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={clearDatabaseSelection.savedSelections}
+                  onChange={(event) =>
+                    setClearDatabaseSelection((current) => ({
+                      ...current,
+                      savedSelections: event.target.checked,
+                    }))
+                  }
+                />
+                {" "}
+                Saved Selections
+              </span>
+              <small>Removes saved file selections for your sources.</small>
+            </label>
+            <label className="field">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={clearDatabaseSelection.savedPreviewData}
+                  onChange={(event) =>
+                    setClearDatabaseSelection((current) => ({
+                      ...current,
+                      savedPreviewData: event.target.checked,
+                    }))
+                  }
+                />
+                {" "}
+                Saved Preview Data
+              </span>
+              <small>Removes saved Sample File Extensions.</small>
+            </label>
+            <label className="field">
+              <span>
+                <input
+                  type="checkbox"
+                  checked={clearDatabaseSelection.updateLogs}
+                  onChange={(event) =>
+                    setClearDatabaseSelection((current) => ({
+                      ...current,
+                      updateLogs: event.target.checked,
+                    }))
+                  }
+                />
+                {" "}
+                Update Logs
+              </span>
+              <small>Removes saved database update logs.</small>
+            </label>
+          </div>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => {
+                setShowClearDatabaseModal(false);
+                setClearDatabaseSelection(EMPTY_CLEAR_DATABASE_SELECTION);
+              }}
+              disabled={clearingDatabase}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button danger-button"
+              onClick={() => setShowClearDatabaseConfirmModal(true)}
+              disabled={clearDatabaseSelectionCount === 0 || clearingDatabase}
+            >
+              Clear Selected Data
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showClearDatabaseConfirmModal ? (
+        <Modal
+          title="Confirm Clear Database"
+          onClose={() => {
+            if (!clearingDatabase) {
+              setShowClearDatabaseConfirmModal(false);
+            }
+          }}
+          showHeaderClose={false}
+        >
+          <p>
+            This will permanently remove the selected local database data. This cannot be
+            undone.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setShowClearDatabaseConfirmModal(false)}
+              disabled={clearingDatabase}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button danger-button"
+              onClick={() => {
+                void clearDatabase();
+              }}
+              disabled={clearingDatabase}
+            >
+              Clear Data
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showManualReloadModal ? (
+        <Modal
+          title="Reload source.json"
+          onClose={() => setShowManualReloadModal(false)}
+          showHeaderClose={false}
+        >
+          <p>
+            Reloading from disk will discard your current drafts and edit history. Any
+            unsaved changes in the editor will be lost.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setShowManualReloadModal(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                void reloadFromDisk();
+              }}
+            >
+              Reload from Disk
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {showExternalReloadModal ? (
+        <Modal
+          title="source.json changed on disk"
+          onClose={() => setShowExternalReloadModal(false)}
+          showHeaderClose={false}
+        >
+          <p>
+            source.json changed outside the editor. Reload from disk to discard the
+            current draft, or keep the current draft active and continue editing.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setShowExternalReloadModal(false)}
+            >
+              Keep Current Draft
+            </button>
+            <button
+              type="button"
+              className="primary-button"
+              onClick={() => {
+                void reloadFromDisk();
+              }}
+            >
+              Reload from Disk
+            </button>
+          </div>
+        </Modal>
+      ) : null}
+
+      {missingCacheSourceName ? (
+        <Modal
+          title="File cache required"
+          onClose={() => setMissingCacheSourceName(null)}
+        >
+          <p>
+            Refresh Database before opening <strong>{missingCacheSourceName}</strong>. This
+            source does not currently have local file cache for its current content
+            boundary.
+          </p>
+          <div className="modal-actions">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => setMissingCacheSourceName(null)}
+            >
+              Close
             </button>
           </div>
         </Modal>
@@ -1022,7 +1966,7 @@ function App() {
             <InfoSectionTitle title="Source" />
             <InfoRow label="Name" value={infoEntry.displayName} />
             <InfoRow label="Subfolder" value={infoEntry.subfolder} />
-            <InfoRow label="Scope path" value={infoEntry.scope.normalizedPath} />
+            <InfoRow label="Path" value={infoEntry.scope.normalizedPath} />
             <InfoRow
               label="Nested files"
               value={
@@ -1083,17 +2027,23 @@ function App() {
 }
 
 function FilesPanel({
-  entry,
   sourceFiles,
   errorMessage,
   selectedRowIds,
+  baseFileCount,
+  searchText,
+  showSearch,
+  onSearchChange,
   onRetry,
   onToggle,
 }: {
-  entry: PreviewEntry;
   sourceFiles: SourceFilesState | null;
   errorMessage: string | null;
   selectedRowIds: string[];
+  baseFileCount: number;
+  searchText: string;
+  showSearch: boolean;
+  onSearchChange: (value: string) => void;
   onRetry: () => void;
   onToggle: (fileId: string) => void;
 }) {
@@ -1101,33 +2051,37 @@ function FilesPanel({
     return (
       errorMessage ? (
         <div className="empty-state">
-          <strong>Could not load this source</strong>
-          <p>{errorMessage}</p>
+          <strong>Could not load files</strong>
+          <p>The file list could not be loaded for this source. Try again.</p>
           <button type="button" className="ghost-button" onClick={onRetry}>
             Retry
           </button>
         </div>
       ) : (
         <EmptyState
-          title="Loading saved file list"
-          body={`Checking the local database for ${entry.displayName}.`}
+          title="Loading files"
+          body="Checking the local database for this source."
         />
       )
     );
   }
 
   const loadError = errorMessage ? <div className="inline-error">{errorMessage}</div> : null;
+  const loadFailureState = (
+    <>
+      {loadError}
+      <div className="empty-state">
+        <strong>Could not load files</strong>
+        <p>The file list could not be loaded for this source. Try again.</p>
+        <button type="button" className="ghost-button" onClick={onRetry}>
+          Retry
+        </button>
+      </div>
+    </>
+  );
 
   if (sourceFiles.sourceStatus === "missing") {
-    return (
-      <>
-        {loadError}
-        <EmptyState
-          title="This source has not been loaded yet"
-          body="Use Update Database to pull its file list from Real-Debrid before previewing it here."
-        />
-      </>
-    );
+    return loadFailureState;
   }
 
   if (sourceFiles.sourceStatus === "preparing") {
@@ -1149,18 +2103,10 @@ function FilesPanel({
   }
 
   if (sourceFiles.sourceStatus === "error") {
-    return (
-      <>
-        {loadError}
-        <EmptyState
-          title="Could not load this source"
-          body={sourceFiles.errorMessage ?? "The saved data for this source is in an error state."}
-        />
-      </>
-    );
+    return loadFailureState;
   }
 
-  if (sourceFiles.files.length === 0) {
+  if (sourceFiles.files.length === 0 && !(baseFileCount > 0 && searchText.trim().length > 0)) {
     return (
       <>
         {loadError}
@@ -1175,38 +2121,48 @@ function FilesPanel({
   return (
     <>
       {loadError}
-      <ul className="file-list">
-        {sourceFiles.files.map((file) => {
-          const checked = selectedRowIds.includes(file.id);
-          return (
-            <li key={file.id} className="file-row">
-              <label className="file-toggle">
-                <input
-                  type="checkbox"
-                  checked={checked}
-                  onChange={() => onToggle(file.id)}
-                />
-                <div className="file-copy">
-                  <div className="file-title-row">
-                    <strong>{file.originalName}</strong>
-                    <CopyStemButton filename={file.originalName} />
+      {showSearch ? (
+        <div className="field">
+          <input
+            type="search"
+            value={searchText}
+            onChange={(event) => onSearchChange(event.target.value)}
+            placeholder="Search files"
+          />
+        </div>
+      ) : null}
+      {sourceFiles.files.length === 0 ? (
+        <EmptyState
+          title="No files matched your search"
+          body="Try a different file name or clear the current search."
+        />
+      ) : (
+        <ul className="file-list">
+          {sourceFiles.files.map((file) => {
+            const checked = selectedRowIds.includes(file.id);
+            return (
+              <li key={file.id} className="file-row">
+                <div className="file-toggle">
+                  <input
+                    type="checkbox"
+                    checked={checked}
+                    onChange={() => onToggle(file.id)}
+                  />
+                  <div className="file-copy">
+                    <div className="file-title-row">
+                      <strong>{file.originalName}</strong>
+                      <CopyStemButton filename={file.originalName} />
+                    </div>
                   </div>
-                  <p>{file.relativePath}</p>
-                  {shouldShowRenameHint(entry, file) ? (
-                    <small>
-                      Output: {applyRenameRule(entry.renameRule, file.originalName)}
-                    </small>
-                  ) : null}
                 </div>
-              </label>
-              <div className="file-meta">
-                {file.partLabel ? <span>{file.partLabel}</span> : null}
-                {file.sizeBytes !== null ? <small>{formatBytes(file.sizeBytes)}</small> : null}
-              </div>
-            </li>
-          );
-        })}
-      </ul>
+                <div className="file-meta">
+                  {file.sizeBytes !== null ? <small>{formatBytes(file.sizeBytes)}</small> : null}
+                </div>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </>
   );
 }
@@ -1223,8 +2179,8 @@ function DownloadPreviewPanel({
   entry: PreviewEntry;
   selectedRows: SourceFileRow[];
   sourceFiles: SourceFilesState | null;
-  archiveFixtures: ReturnType<typeof buildDownloadPreview>["archiveFixtures"];
-  previewTree: ReturnType<typeof buildDownloadPreview>["tree"];
+  archiveFixtures: ArchiveFixtureDescriptor[];
+  previewTree: PreviewTreeNode;
   errorMessage: string | null;
   onSaveFixture: (fixture: PreviewFixture) => void;
 }) {
@@ -1340,539 +2296,451 @@ function DownloadPreviewPanel({
 }
 
 function SourcePolicyWorkbench({
-  entry,
-  sourceFiles,
-  onDraftStateChange,
+  controller,
 }: {
-  entry: PreviewEntry;
-  sourceFiles: SourceFilesState | null;
-  onDraftStateChange: (draft: SourcePolicyDraft | null) => void;
+  controller: ReturnType<typeof useSourceEditorController>;
 }) {
-  const [renameMode, setRenameMode] = useState<"none" | "all" | "phrases">("none");
-  const [renamePhrases, setRenamePhrases] = useState<string[]>([]);
-  const [ignoreGlobs, setIgnoreGlobs] = useState<string[]>([""]);
-  const [renameRequestError, setRenameRequestError] = useState<string | null>(null);
-  const [ignoreRequestError, setIgnoreRequestError] = useState<string | null>(null);
-  const pendingPolicySaveRef = useRef<PendingPolicySave | null>(null);
-  const [confirmRenameReplacement, setConfirmRenameReplacement] = useState<{
-    payload: {
-      entryId: string;
-      selectionStateKey: string;
-      displayName: string;
-      subfolder: string;
-      renamePolicy?: {
-        mode: "none" | "all" | "phrases";
-        phrases: string[];
-      };
-      ignoreGlobs?: string[];
-      confirmReplaceCustomRename?: boolean;
-    };
-    appliedSections: {
-      rename: boolean;
-      ignore: boolean;
-    };
-    message: string;
-  } | null>(null);
-  const fileNames = useMemo(
-    () =>
-      sourceFiles?.sourceStatus === "ready"
-        ? (sourceFiles.analysisOriginalNames ??
-          sourceFiles.analysisFiles?.map((file) => file.originalName) ??
-          sourceFiles.files.map((file) => file.originalName))
-        : [],
-    [sourceFiles],
-  );
-  const rawFiles = useMemo(
-    () =>
-      sourceFiles?.sourceStatus === "ready"
-        ? (sourceFiles.analysisFiles ?? sourceFiles.files)
-        : [],
-    [sourceFiles],
-  );
-  const analysis = useMemo(() => analyzeParentheticalSuffixes(fileNames), [fileNames]);
-  const availablePhrases = useMemo(
-    () => analysis.parentheticalPhrases.map((phrase) => phrase.phrase),
-    [analysis.parentheticalPhrases],
-  );
-  const currentRenamePolicy = useMemo(
-    () => detectManagedRenamePolicy(entry.renameRule, availablePhrases),
-    [availablePhrases, entry.renameRule],
-  );
-  const entryPolicySignature = useMemo(
-    () =>
-      JSON.stringify({
-        entryId: entry.id,
-        ignoreGlobs: entry.ignoreGlobs,
-        renameRule: entry.renameRule,
-      }),
-    [entry.id, entry.ignoreGlobs, entry.renameRule],
-  );
-  const normalizedIgnoreGlobs = useMemo(
-    () => normalizeSourcePolicyGlobs(ignoreGlobs),
-    [ignoreGlobs],
-  );
-  const invalidIgnoreGlobs = useMemo(
-    () => normalizedIgnoreGlobs.filter((glob) => !isValidIgnoreRule(glob)),
-    [normalizedIgnoreGlobs],
-  );
-  const savedRenameDraft = useMemo<ManagedRenameDraft>(() => {
-    if (currentRenamePolicy.mode === "all") {
-      return {
-        mode: "all",
-        phrases: availablePhrases,
-      };
-    }
-    if (currentRenamePolicy.mode === "phrases") {
-      return {
-        mode: "phrases",
-        phrases: currentRenamePolicy.phrases,
-      };
-    }
-    return {
-      mode: "none",
-      phrases: [],
-    };
-  }, [availablePhrases, currentRenamePolicy]);
-  const currentRenameDraft = useMemo<ManagedRenameDraft>(() => {
-    if (renameMode === "all") {
-      return {
-        mode: "all",
-        phrases: availablePhrases,
-      };
-    }
-    if (renameMode === "phrases") {
-      return {
-        mode: "phrases",
-        phrases: normalizeSourcePolicyGlobs(renamePhrases),
-      };
-    }
-    return {
-      mode: "none",
-      phrases: [],
-    };
-  }, [availablePhrases, renameMode, renamePhrases]);
-  const phraseOptions = useMemo(() => {
-    return buildPhraseOptions(
-      analysis.parentheticalPhrases,
-      currentRenameDraft.phrases,
-    );
-  }, [analysis.parentheticalPhrases, currentRenameDraft.phrases]);
-  const savedIgnoreGlobs = useMemo(
-    () => normalizeSourcePolicyGlobs(entry.ignoreGlobs),
-    [entry.ignoreGlobs],
-  );
-  const renameDirty = useMemo(
-    () =>
-      currentRenameDraft.mode !== savedRenameDraft.mode ||
-      !sameStringArray(currentRenameDraft.phrases, savedRenameDraft.phrases),
-    [currentRenameDraft, savedRenameDraft],
-  );
-  const ignoreDirty = useMemo(
-    () => !sameStringArray(normalizedIgnoreGlobs, savedIgnoreGlobs),
-    [normalizedIgnoreGlobs, savedIgnoreGlobs],
-  );
-  const hasUnsavedChanges = renameDirty || ignoreDirty;
-  const draftVisibleFiles = useMemo(() => {
-    if (sourceFiles?.sourceStatus !== "ready") {
-      return [];
-    }
-    if (invalidIgnoreGlobs.length > 0) {
-      return sourceFiles.files;
-    }
-    return filterSourceFilesByIgnoreGlobs(rawFiles, normalizedIgnoreGlobs);
-  }, [invalidIgnoreGlobs.length, normalizedIgnoreGlobs, rawFiles, sourceFiles]);
-  const draftIgnoreCount = useMemo(() => {
-    if (sourceFiles?.sourceStatus !== "ready") {
-      return null;
-    }
-    if (invalidIgnoreGlobs.length > 0) {
-      return null;
-    }
-    const matchesIgnore = compileIgnoreMatcher(normalizedIgnoreGlobs);
-    return fileNames.filter((fileName) => matchesIgnore(fileName)).length;
-  }, [fileNames, invalidIgnoreGlobs.length, normalizedIgnoreGlobs, sourceFiles]);
-  const draftRenameChangedCount = useMemo(() => {
-    if (sourceFiles?.sourceStatus !== "ready") {
-      return null;
-    }
-    if (invalidIgnoreGlobs.length > 0) {
-      return null;
-    }
-    return draftVisibleFiles.filter((file) =>
-      applyManagedRenameRule(
-        {
-          mode: renameMode,
-          phrases: renamePhrases,
-        },
-        file.originalName,
-        availablePhrases,
-      ) !== file.originalName,
-    ).length;
-  }, [
-    availablePhrases,
-    draftVisibleFiles,
-    invalidIgnoreGlobs.length,
-    renameMode,
-    renamePhrases,
-    sourceFiles,
-  ]);
+  const entry = controller.source?.entry;
+  const [showStatistics, setShowStatistics] = useState(false);
+  const statisticsWarnings = [
+    ...controller.analysis.warnings,
+    ...controller.invalidIgnoreGlobs.map((glob) => `Invalid ignore glob: ${glob}`),
+  ];
 
   useEffect(() => {
-    onDraftStateChange({
-      entryId: entry.id,
-      renameMode: currentRenameDraft.mode,
-      renamePhrases: currentRenameDraft.phrases,
-      ignoreGlobs,
-      renameDirty,
-      ignoreDirty,
-      hasUnsavedChanges,
-    });
-  }, [
-    currentRenameDraft.mode,
-    currentRenameDraft.phrases,
-    entry.id,
-    hasUnsavedChanges,
-    ignoreDirty,
-    ignoreGlobs,
-    onDraftStateChange,
-    renameDirty,
-  ]);
+    setShowStatistics(false);
+  }, [entry?.id]);
 
-  useEffect(() => {
-    setRenameRequestError(null);
-    setIgnoreRequestError(null);
-    setConfirmRenameReplacement(null);
-    const nextState = syncSourcePolicyEditorState(
-      {
-        renameMode,
-        renamePhrases,
-        ignoreGlobs,
-      },
-      savedRenameDraft,
-      savedIgnoreGlobs,
-      pendingPolicySaveRef.current,
-      entry.id,
-    );
-    pendingPolicySaveRef.current = null;
-    setRenameMode(nextState.renameMode);
-    setRenamePhrases(nextState.renamePhrases);
-    setIgnoreGlobs(nextState.ignoreGlobs);
-  }, [entryPolicySignature]);
-
-  const renameWarnings = useMemo(() => {
-    const nextWarnings = [...analysis.warnings];
-    if (currentRenamePolicy.isCustom) {
-      nextWarnings.unshift(
-        "This source currently uses a custom rename regex from source.json. Applying a simulator rename policy will replace it after confirmation.",
-      );
-    }
-    return nextWarnings;
-  }, [analysis.warnings, currentRenamePolicy.isCustom]);
-
-  async function submitPolicyUpdate(payload: {
-    entryId: string;
-    selectionStateKey: string;
-    displayName: string;
-    subfolder: string;
-    renamePolicy?: {
-      mode: "none" | "all" | "phrases";
-      phrases: string[];
-    };
-    ignoreGlobs?: string[];
-    confirmReplaceCustomRename?: boolean;
-  }, appliedSections: { rename: boolean; ignore: boolean }) {
-    pendingPolicySaveRef.current = {
-      entryId: entry.id,
-      ...appliedSections,
-    };
-    const response = await fetch("/__simulator/source-entry-policy", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
-    const responseBody = (await response.json()) as {
-      status?: "ok" | "needs-confirmation";
-      kind?: "custom-rename";
-      error?: string;
-    };
-    if (response.ok) {
-      return;
-    }
-    pendingPolicySaveRef.current = null;
-    if (
-      response.status === 409 &&
-      responseBody.status === "needs-confirmation" &&
-      responseBody.kind === "custom-rename"
-    ) {
-      setConfirmRenameReplacement({
-        payload,
-        appliedSections,
-        message:
-          responseBody.error ??
-          "This source already has a custom rename regex. Confirm replacement before continuing.",
-      });
-      return;
-    }
-    throw new Error(responseBody.error ?? "The source entry policy could not be saved");
-  }
-
-  async function applyRenamePolicy() {
-    setRenameRequestError(null);
-    if (!renameDirty) {
-      return;
-    }
-    if (renameMode === "phrases" && renamePhrases.length === 0) {
-      setRenameRequestError(
-        "Choose at least one phrase, or switch Rename Policy to Keep names.",
-      );
-      return;
-    }
-
-    try {
-      await submitPolicyUpdate({
-        entryId: entry.id,
-        selectionStateKey: entry.selectionStateKey,
-        displayName: entry.displayName,
-        subfolder: entry.subfolder,
-        renamePolicy: {
-          mode: renameMode,
-          phrases: renameMode === "all" ? availablePhrases : renamePhrases,
-        },
-      }, {
-        rename: true,
-        ignore: false,
-      });
-    } catch (error) {
-      setRenameRequestError(
-        error instanceof Error ? error.message : "The rename policy could not be saved",
-      );
-    }
-  }
-
-  async function applyIgnorePolicy() {
-    setIgnoreRequestError(null);
-    if (!ignoreDirty) {
-      return;
-    }
-    if (invalidIgnoreGlobs.length > 0) {
-      setIgnoreRequestError("Fix the invalid ignore globs before saving.");
-      return;
-    }
-
-    try {
-      await submitPolicyUpdate({
-        entryId: entry.id,
-        selectionStateKey: entry.selectionStateKey,
-        displayName: entry.displayName,
-        subfolder: entry.subfolder,
-        ignoreGlobs: normalizedIgnoreGlobs,
-      }, {
-        rename: false,
-        ignore: true,
-      });
-    } catch (error) {
-      setIgnoreRequestError(
-        error instanceof Error ? error.message : "The ignore policy could not be saved",
-      );
-    }
-  }
-
-  const sourceReady = sourceFiles?.sourceStatus === "ready";
-
-  function discardLocalChanges() {
-    setRenameRequestError(null);
-    setIgnoreRequestError(null);
-    setConfirmRenameReplacement(null);
-    setRenameMode(savedRenameDraft.mode);
-    setRenamePhrases(savedRenameDraft.phrases);
-    setIgnoreGlobs(savedIgnoreGlobs.length > 0 ? [...savedIgnoreGlobs] : [""]);
+  if (!entry) {
+    return null;
   }
 
   return (
-    <>
-      <section className="maintainer-layout">
-        <article className="panel policy-panel-wide policy-status-panel">
-          <div className="policy-actions-row">
-            <span className="policy-summary">
-              {hasUnsavedChanges
-                ? "Local draft preview is active until you apply or discard these changes"
-                : "No local draft changes"}
-            </span>
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={discardLocalChanges}
-              disabled={!hasUnsavedChanges}
-            >
-              Discard local changes
-            </button>
-          </div>
-        </article>
-
-        <article className="panel policy-panel policy-scroll-panel">
+    <section className="maintainer-layout">
+      {controller.unarchiveRelevant ? (
+        <article className="panel policy-panel-wide">
           <PanelTitle
-            title="Rename Policy"
-            subtitle="Select the exact parenthetical phrases this source should strip before saving final files"
+            title="Unarchive"
+            subtitle="Choose how archive files should be extracted in the current draft"
           />
-          {!sourceReady ? (
+          {!controller.sourceReady ? (
             <div className="panel-scroll-body policy-body">
               <EmptyState
-                title="No rename analysis yet"
-                body="Hydrate and open this source first so the simulator can inspect its observed file names."
+                title="No unarchive controls yet"
+                body="Hydrate and open this source first so the simulator can inspect archive files."
               />
             </div>
           ) : (
-            <div className="policy-editor-body">
-              {renameRequestError ? (
-                <div className="inline-error">{renameRequestError}</div>
-              ) : null}
-              {renameWarnings.length > 0 ? (
-                <div className="policy-warning-list">
-                  {renameWarnings.map((warning) => (
-                    <p key={warning}>{warning}</p>
-                  ))}
+            <div className="policy-editor-body unarchive-surface">
+              <div className="unarchive-toolbar">
+                <div>
+                  <span className="toolbar-label">Extraction</span>
+                  <p className="section-copy">
+                    Turn archive extraction on or off for the current draft.
+                  </p>
                 </div>
-              ) : null}
-              <div className="policy-mode-row">
-                <button
-                  type="button"
-                  className={renameMode === "none" ? "primary-button" : "ghost-button"}
-                  onClick={() => {
-                    setRenameMode("none");
-                    setRenamePhrases([]);
-                  }}
-                >
-                  Keep names
-                </button>
-                <button
-                  type="button"
-                  className={renameMode === "all" ? "primary-button" : "ghost-button"}
-                  onClick={() => {
-                    setRenameMode("all");
-                    setRenamePhrases(availablePhrases);
-                  }}
-                  disabled={availablePhrases.length === 0}
-                >
-                  All phrases
-                </button>
-                <button
-                  type="button"
-                  className={renameMode === "phrases" ? "primary-button" : "ghost-button"}
-                  onClick={() => {
-                    setRenameMode("phrases");
-                    setRenamePhrases((current) =>
-                      current.length > 0 ? current : availablePhrases.slice(0, 1),
-                    );
-                  }}
-                  disabled={phraseOptions.length === 0}
-                >
-                  Selected phrases
-                </button>
+                <div className="policy-mode-row">
+                  <button
+                    type="button"
+                    className={!controller.unarchiveEnabled ? "primary-button" : "ghost-button"}
+                    onClick={() => controller.setUnarchiveEnabled(false)}
+                  >
+                    Off
+                  </button>
+                  <button
+                    type="button"
+                    className={controller.unarchiveEnabled ? "primary-button" : "ghost-button"}
+                    onClick={() => controller.setUnarchiveEnabled(true)}
+                  >
+                    On
+                  </button>
+                </div>
               </div>
-              {renameMode === "phrases" ? (
-                phraseOptions.length > 0 ? (
-                  <>
-                    <div className="panel-scroll-body policy-editor-scroll">
-                      <ul className="policy-checklist">
-                        {phraseOptions.map((phrase) => {
-                          const checked = renamePhrases.includes(phrase.phrase);
-                          return (
-                            <li key={phrase.phrase}>
-                              <label className="policy-check">
-                                <input
-                                  type="checkbox"
-                                  checked={checked}
-                                  onChange={() => {
-                                    setRenamePhrases((current) =>
-                                      checked
-                                        ? current.filter((value) => value !== phrase.phrase)
-                                        : [...current, phrase.phrase].sort(),
-                                    );
-                                  }}
-                                />
-                                <span className="policy-check-copy">
-                                  <strong>{phrase.phrase}</strong>
-                                  <small>
-                                    {phrase.observed
-                                      ? `${phrase.count} file(s)`
-                                      : "Not currently observed in cached files"}
-                                  </small>
-                                </span>
-                              </label>
-                            </li>
-                          );
-                        })}
-                      </ul>
-                    </div>
-                    <div className="policy-actions-row policy-checklist-actions">
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => {
-                          setRenamePhrases(phraseOptions.map((phrase) => phrase.phrase));
-                        }}
-                      >
-                        Select all
-                      </button>
-                      <button
-                        type="button"
-                        className="ghost-button"
-                        onClick={() => {
-                          setRenamePhrases([]);
-                        }}
-                      >
-                        Select none
-                      </button>
-                    </div>
-                  </>
-                ) : (
-                  <div className="panel-scroll-body policy-editor-scroll">
-                    <EmptyState
-                      title="No phrases found"
-                      body="This source does not currently show any managed parenthetical phrases to edit."
-                    />
+              {controller.unarchiveEnabled ? (
+                <>
+                  <div className="choice-grid">
+                    <button
+                      type="button"
+                      className={`choice-card ${
+                        controller.unarchiveLayoutMode === "flat"
+                          ? "choice-card-active"
+                          : ""
+                      }`}
+                      onClick={() => controller.setUnarchiveLayoutMode("flat")}
+                    >
+                      <strong>Flat</strong>
+                      <small>Extract files directly into the source subfolder.</small>
+                    </button>
+                    <button
+                      type="button"
+                      className={`choice-card ${
+                        controller.unarchiveLayoutMode === "dedicatedFolder"
+                          ? "choice-card-active"
+                          : ""
+                      }`}
+                      onClick={() => controller.setUnarchiveLayoutMode("dedicatedFolder")}
+                    >
+                      <strong>Dedicated Folder</strong>
+                      <small>Put each extracted archive inside its own named folder.</small>
+                    </button>
                   </div>
-                )
+                  {controller.unarchiveLayoutMode === "dedicatedFolder" ? (
+                    <div className="subsection-card field-stack">
+                      <div className="subsection-heading">
+                        <strong>Dedicated Folder Rename</strong>
+                        <p>
+                          Control how each extracted folder name is derived before files are saved.
+                        </p>
+                      </div>
+                      {controller.dedicatedRenameWarnings.length > 0 ? (
+                        <div className="policy-warning-list">
+                          {controller.dedicatedRenameWarnings.map((warning) => (
+                            <p key={warning}>{warning}</p>
+                          ))}
+                        </div>
+                      ) : null}
+                      <div className="policy-mode-row">
+                        <button
+                          type="button"
+                          className={
+                            controller.dedicatedRenameMode === "none"
+                              ? "primary-button"
+                              : "ghost-button"
+                          }
+                          onClick={() => controller.updateDedicatedRenameDraft("none", [])}
+                        >
+                          No rename
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            controller.dedicatedRenameMode === "all"
+                              ? "primary-button"
+                              : "ghost-button"
+                          }
+                          onClick={() => controller.updateDedicatedRenameDraft("all")}
+                        >
+                          All phrases
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            controller.dedicatedRenameMode === "phrases"
+                              ? "primary-button"
+                              : "ghost-button"
+                          }
+                          onClick={() => controller.updateDedicatedRenameDraft("phrases")}
+                        >
+                          Selected phrases
+                        </button>
+                        <button
+                          type="button"
+                          className={
+                            controller.dedicatedRenameMode === "custom"
+                              ? "primary-button"
+                              : "ghost-button"
+                          }
+                          onClick={() => controller.updateDedicatedRenameDraft("custom")}
+                        >
+                          Custom
+                        </button>
+                      </div>
+                      {controller.dedicatedRenameMode === "custom" ? (
+                        <div className="field-stack">
+                          <label className="field">
+                            <span>Pattern</span>
+                            <input
+                              type="text"
+                              value={controller.customDedicatedRenameRule.pattern}
+                              onChange={(event) =>
+                                controller.updateCustomDedicatedRenameRule({
+                                  ...controller.customDedicatedRenameRule,
+                                  pattern: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                          <label className="field">
+                            <span>Replacement</span>
+                            <input
+                              type="text"
+                              value={controller.customDedicatedRenameRule.replacement}
+                              onChange={(event) =>
+                                controller.updateCustomDedicatedRenameRule({
+                                  ...controller.customDedicatedRenameRule,
+                                  replacement: event.target.value,
+                                })
+                              }
+                            />
+                          </label>
+                          {controller.dedicatedRenameIssue ? (
+                            <div className="inline-error">{controller.dedicatedRenameIssue}</div>
+                          ) : null}
+                        </div>
+                      ) : null}
+                      {controller.dedicatedRenameMode === "phrases" ? (
+                        <>
+                          <div className="panel-scroll-body policy-editor-scroll">
+                            <ul className="policy-checklist">
+                              {controller.dedicatedPhraseOptions.length === 0 ? (
+                                <li>
+                                  <span className="policy-check-copy">
+                                    <strong>None</strong>
+                                    <small>No parenthetical phrases are currently detected.</small>
+                                  </span>
+                                </li>
+                              ) : (
+                                controller.dedicatedPhraseOptions.map((phrase) => {
+                                  const checked = controller.dedicatedRenamePhrases.includes(
+                                    phrase.phrase,
+                                  );
+                                  return (
+                                    <li key={phrase.phrase}>
+                                      <label className="policy-check">
+                                        <input
+                                          type="checkbox"
+                                          checked={checked}
+                                          onChange={() => {
+                                            controller.updateDedicatedRenameDraft(
+                                              "phrases",
+                                              checked
+                                                ? controller.dedicatedRenamePhrases.filter(
+                                                    (value) => value !== phrase.phrase,
+                                                  )
+                                                : [
+                                                    ...controller.dedicatedRenamePhrases,
+                                                    phrase.phrase,
+                                                  ].sort(),
+                                            );
+                                          }}
+                                        />
+                                        <span className="policy-check-copy">
+                                          <strong>{phrase.phrase}</strong>
+                                          <small>
+                                            {phrase.observed
+                                              ? `${phrase.count} file(s)`
+                                              : "Not currently observed in cached files"}
+                                          </small>
+                                        </span>
+                                      </label>
+                                    </li>
+                                  );
+                                })
+                              )}
+                            </ul>
+                          </div>
+                          {controller.dedicatedPhraseOptions.length > 0 ? (
+                            <div className="policy-actions-row policy-checklist-actions">
+                              <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={controller.selectAllDedicatedPhrases}
+                              >
+                                Select all
+                              </button>
+                              <button
+                                type="button"
+                                className="ghost-button"
+                                onClick={controller.clearDedicatedPhrases}
+                              >
+                                Select none
+                              </button>
+                            </div>
+                          ) : null}
+                        </>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
               ) : null}
-              <div className="policy-actions-row">
-                <span className="policy-summary">
-                  {draftRenameChangedCount === null
-                    ? "Hydrate this source to count affected file names"
-                    : `${draftRenameChangedCount} file(s) would change with the current rename draft`}
-                </span>
-                <button
-                  type="button"
-                  className="primary-button"
-                  onClick={() => {
-                    void applyRenamePolicy();
-                  }}
-                  disabled={
-                    !sourceReady ||
-                    !renameDirty ||
-                    (renameMode === "phrases" && renamePhrases.length === 0)
-                  }
-                >
-                  Apply Rename Policy
-                </button>
-              </div>
             </div>
           )}
         </article>
+      ) : null}
 
-        <article className="panel policy-panel policy-scroll-panel">
-          <PanelTitle
-            title="File Ignore Policy"
-            subtitle="Edit the ignore globs for this source and write them back to source.json"
-          />
+      <article className="panel policy-panel policy-scroll-panel">
+        <PanelTitle
+          title="Rename"
+          subtitle="Select the exact parenthetical phrases this source should strip before saving final files"
+        />
+        {!controller.sourceReady ? (
+          <div className="panel-scroll-body policy-body">
+            <EmptyState
+              title="No rename analysis yet"
+              body="Hydrate and open this source first so the simulator can inspect its observed file names."
+            />
+          </div>
+        ) : (
           <div className="policy-editor-body">
-            {ignoreRequestError ? (
-              <div className="inline-error">{ignoreRequestError}</div>
+            {controller.renameWarnings.length > 0 ? (
+              <div className="policy-warning-list">
+                {controller.renameWarnings.map((warning) => (
+                  <p key={warning}>{warning}</p>
+                ))}
+              </div>
             ) : null}
-            <div className="panel-scroll-body policy-editor-scroll">
+            <div className="policy-mode-row">
+              <button
+                type="button"
+                className={controller.renameMode === "none" ? "primary-button" : "ghost-button"}
+                onClick={() => {
+                  controller.updateRenameDraft("none", []);
+                }}
+              >
+                No rename
+              </button>
+              <button
+                type="button"
+                className={controller.renameMode === "all" ? "primary-button" : "ghost-button"}
+                onClick={() => {
+                  controller.updateRenameDraft("all");
+                }}
+              >
+                All phrases
+              </button>
+              <button
+                type="button"
+                className={controller.renameMode === "phrases" ? "primary-button" : "ghost-button"}
+                onClick={() => {
+                  controller.updateRenameDraft("phrases");
+                }}
+              >
+                Selected phrases
+              </button>
+              <button
+                type="button"
+                className={controller.renameMode === "custom" ? "primary-button" : "ghost-button"}
+                onClick={() => {
+                  controller.updateRenameDraft("custom");
+                }}
+              >
+                Custom
+              </button>
+            </div>
+            {controller.renameMode === "custom" ? (
               <div className="field-stack">
-                {ignoreGlobs.map((glob, index) => (
+                <label className="field">
+                  <span>Pattern</span>
+                  <input
+                    type="text"
+                    value={controller.customRenameRule.pattern}
+                    onChange={(event) =>
+                      controller.updateCustomRenameRule({
+                        ...controller.customRenameRule,
+                        pattern: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label className="field">
+                  <span>Replacement</span>
+                  <input
+                    type="text"
+                    value={controller.customRenameRule.replacement}
+                    onChange={(event) =>
+                      controller.updateCustomRenameRule({
+                        ...controller.customRenameRule,
+                        replacement: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                {controller.renameIssue ? (
+                  <div className="inline-error">{controller.renameIssue}</div>
+                ) : null}
+              </div>
+            ) : null}
+            {controller.renameMode === "phrases" ? (
+              <>
+                <div className="panel-scroll-body policy-editor-scroll">
+                  <ul className="policy-checklist">
+                    {controller.phraseOptions.length === 0 ? (
+                      <li>
+                        <span className="policy-check-copy">
+                          <strong>None</strong>
+                          <small>No parenthetical phrases are currently detected.</small>
+                        </span>
+                      </li>
+                    ) : (
+                      controller.phraseOptions.map((phrase) => {
+                        const checked = controller.renamePhrases.includes(phrase.phrase);
+                        return (
+                          <li key={phrase.phrase}>
+                            <label className="policy-check">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={() => {
+                                  controller.updateRenameDraft(
+                                    "phrases",
+                                    checked
+                                      ? controller.renamePhrases.filter(
+                                          (value) => value !== phrase.phrase,
+                                        )
+                                      : [...controller.renamePhrases, phrase.phrase].sort(),
+                                  );
+                                }}
+                              />
+                              <span className="policy-check-copy">
+                                <strong>{phrase.phrase}</strong>
+                                <small>
+                                  {phrase.observed
+                                    ? `${phrase.count} file(s)`
+                                    : "Not currently observed in cached files"}
+                                </small>
+                              </span>
+                            </label>
+                          </li>
+                        );
+                      })
+                    )}
+                  </ul>
+                </div>
+                {controller.phraseOptions.length > 0 ? (
+                  <div className="policy-actions-row policy-checklist-actions">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={controller.selectAllPhrases}
+                    >
+                      Select all
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={controller.clearPhrases}
+                    >
+                      Select none
+                    </button>
+                  </div>
+                ) : null}
+              </>
+            ) : null}
+            <div className="policy-actions-row">
+              <span className="policy-summary">
+                {controller.draftRenameChangedCount === null
+                  ? "Hydrate this source to count affected file names"
+                  : `${controller.draftRenameChangedCount} file(s) would change with the current rename draft`}
+              </span>
+            </div>
+          </div>
+        )}
+      </article>
+
+      <article className="panel policy-panel policy-scroll-panel">
+        <PanelTitle
+          title="Ignore"
+          subtitle="Edit the ignore globs for this source's shared draft"
+        />
+        <div className="policy-editor-body">
+          <div className="panel-scroll-body policy-editor-scroll">
+            <div className="field-stack">
+              {controller.currentIgnoreGlobs.map((glob, index) => {
+                const normalizedGlob = glob.trim();
+                const rowHasInvalidGlob =
+                  normalizedGlob.length > 0 &&
+                  controller.invalidIgnoreGlobs.includes(normalizedGlob);
+                return (
                   <div key={`${entry.id}-${index}`} className="policy-glob-row">
                     <label className="field">
                       <span>{index === 0 ? "Ignore glob" : `Ignore glob ${index + 1}`}</span>
@@ -1881,196 +2749,148 @@ function SourcePolicyWorkbench({
                         value={glob}
                         onChange={(event) => {
                           const nextValue = event.target.value;
-                          setIgnoreGlobs((current) =>
-                            current.map((candidate, candidateIndex) =>
+                          controller.updateIgnoreGlobs(
+                            controller.currentIgnoreGlobs.map((candidate, candidateIndex) =>
                               candidateIndex === index ? nextValue : candidate,
                             ),
                           );
                         }}
                         placeholder={index === 0 ? "* (Japan)*.zip" : "Optional additional glob"}
                       />
+                      {rowHasInvalidGlob ? (
+                        <span className="inline-error">
+                          This ignore glob is invalid. Fix or remove it before saving.
+                        </span>
+                      ) : null}
                     </label>
                     <button
                       type="button"
                       className="ghost-button"
                       onClick={() => {
-                        setIgnoreGlobs((current) =>
-                          current.length === 1
+                        controller.updateIgnoreGlobs(
+                          controller.currentIgnoreGlobs.length === 1
                             ? [""]
-                            : current.filter((_, candidateIndex) => candidateIndex !== index),
+                            : controller.currentIgnoreGlobs.filter(
+                                (_candidate, candidateIndex) => candidateIndex !== index,
+                              ),
                         );
                       }}
                     >
                       Remove
                     </button>
                   </div>
-                ))}
-              </div>
-            </div>
-            <div className="policy-actions-row">
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => {
-                  setIgnoreGlobs((current) => [...current, ""]);
-                }}
-              >
-                Add ignore glob
-              </button>
-              <button
-                type="button"
-                className="primary-button"
-                onClick={() => {
-                  void applyIgnorePolicy();
-                }}
-                disabled={!sourceReady || invalidIgnoreGlobs.length > 0 || !ignoreDirty}
-              >
-                Apply Ignore Policy
-              </button>
+                );
+              })}
             </div>
           </div>
-        </article>
+          <div className="policy-actions-row">
+            <button
+              type="button"
+              className="ghost-button"
+              onClick={() => {
+                controller.updateIgnoreGlobs([...controller.currentIgnoreGlobs, ""]);
+              }}
+            >
+              Add ignore glob
+            </button>
+          </div>
+        </div>
+      </article>
 
-        <article className="panel policy-panel policy-panel-wide">
+      <article className="panel policy-panel policy-panel-wide">
+        <div className="panel-title-row">
           <PanelTitle
             title="Statistics"
-            subtitle="Use the observed counts and phrase frequencies to decide how aggressive your policies should be"
+            subtitle="Use the observed counts to judge how the current draft changes this source"
           />
+          <button
+            type="button"
+            className="ghost-button"
+            onClick={() => setShowStatistics((current) => !current)}
+          >
+            {showStatistics ? "Hide" : "Show"}
+          </button>
+        </div>
+        {showStatistics ? (
           <div className="panel-scroll-body policy-body">
-            {!sourceReady ? (
+            {!controller.sourceReady ? (
               <EmptyState
                 title="No statistics yet"
                 body="Hydrate and open this source first so the simulator can compute policy guidance from real cached file names."
               />
             ) : (
-              <>
-                <div className="policy-stats-grid">
-                  <InfoRow label="Total files" value={String(analysis.totalFiles)} />
-                  <InfoRow
-                    label="Files with parentheses"
-                    value={String(analysis.withParenthesesCount)}
-                  />
-                  <InfoRow
-                    label="Multiple groups"
-                    value={String(analysis.multiParenthesesCount)}
-                  />
-                  <InfoRow
-                    label="Mixed-pattern warnings"
-                    value={String(analysis.trueMiddleTextCount)}
-                  />
-                  <InfoRow
-                    label="All-phrases dot risk"
-                    value={String(analysis.trailingDotTitleCount)}
-                  />
-                  <InfoRow
-                    label="Draft rename changes"
-                    value={
-                      draftRenameChangedCount === null
-                        ? "Unavailable"
-                        : String(draftRenameChangedCount)
-                    }
-                  />
-                  <InfoRow
-                    label="Draft ignore matches"
-                    value={
-                      invalidIgnoreGlobs.length > 0
-                        ? "Invalid globs"
-                        : draftIgnoreCount === null
-                          ? "Unavailable"
-                          : String(draftIgnoreCount)
-                    }
-                  />
-                  <InfoRow
-                    label="Invalid ignore globs"
-                    value={String(invalidIgnoreGlobs.length)}
-                  />
-                </div>
-
-                <details className="policy-disclosure">
-                  <summary className="policy-disclosure-summary">
-                    More statistics
-                  </summary>
-                  <div className="policy-disclosure-body">
-                    {analysis.warnings.length > 0 || invalidIgnoreGlobs.length > 0 ? (
-                      <div className="policy-warning-list">
-                        {analysis.warnings.map((warning) => (
-                          <p key={warning}>{warning}</p>
-                        ))}
-                        {invalidIgnoreGlobs.map((glob) => (
-                          <p key={glob}>{`Invalid ignore glob: ${glob}`}</p>
-                        ))}
-                      </div>
-                    ) : null}
-
-                    <div className="policy-phrase-table">
-                      <div className="policy-phrase-table-header">
-                        <span>Observed phrase</span>
-                        <span>Count</span>
-                      </div>
-                      {analysis.parentheticalPhrases.length > 0 ? (
-                        analysis.parentheticalPhrases.map((phrase) => (
-                          <div key={phrase.phrase} className="policy-phrase-row">
-                            <strong>{phrase.phrase}</strong>
-                            <span>{phrase.count}</span>
-                          </div>
-                        ))
-                      ) : (
-                        <EmptyState
-                          title="No observed phrases"
-                          body="This source has no parenthetical suffix data in its current cached file set."
-                        />
-                      )}
-                    </div>
+              <div className="field-stack">
+                <div className="field-stack">
+                  <h3>File Cache</h3>
+                  <div className="policy-stats-grid">
+                    <InfoRow label="Files" value={String(controller.fileCacheStats.files)} />
+                    <InfoRow
+                      label="Total Size"
+                      value={formatBytes(controller.fileCacheStats.totalSizeBytes)}
+                    />
+                    <InfoRow
+                      label="Files with Parentheses"
+                      value={String(controller.fileCacheStats.withParenthesesCount)}
+                    />
+                    <InfoRow
+                      label="Files with Multiple Parenthetical Groups"
+                      value={String(controller.fileCacheStats.multiParenthesesCount)}
+                    />
                   </div>
-                </details>
-              </>
+                </div>
+                <div className="field-stack">
+                  <h3>Current Draft</h3>
+                  <div className="policy-stats-grid">
+                    <InfoRow label="Files" value={String(controller.draftStats.files)} />
+                    <InfoRow
+                      label="Total Size"
+                      value={formatBytes(controller.draftStats.totalSizeBytes)}
+                    />
+                    <InfoRow
+                      label="Files with Parentheses"
+                      value={String(controller.draftStats.withParenthesesCount)}
+                    />
+                    <InfoRow
+                      label="Files with Multiple Parenthetical Groups"
+                      value={String(controller.draftStats.multiParenthesesCount)}
+                    />
+                    <InfoRow
+                      label="Files Renamed"
+                      value={
+                        controller.draftRenameChangedCount === null
+                          ? "Unavailable"
+                          : String(controller.draftRenameChangedCount)
+                      }
+                    />
+                    <InfoRow
+                      label="Excluded by Scope"
+                      value={String(controller.excludedByScopeCount)}
+                    />
+                    <InfoRow
+                      label="Ignored by Rules"
+                      value={
+                        controller.invalidIgnoreGlobs.length > 0
+                          ? "Invalid globs"
+                          : controller.draftIgnoreCount === null
+                            ? "Unavailable"
+                            : String(controller.draftIgnoreCount)
+                      }
+                    />
+                  </div>
+                </div>
+                {statisticsWarnings.length > 0 ? (
+                  <div className="policy-warning-list">
+                    {statisticsWarnings.map((warning) => (
+                      <p key={warning}>{warning}</p>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
             )}
           </div>
-        </article>
-      </section>
-
-      {confirmRenameReplacement ? (
-        <Modal
-          title="Replace Custom Rename Regex"
-          onClose={() => setConfirmRenameReplacement(null)}
-        >
-          <div className="modal-copy">
-            <strong>{entry.displayName}</strong>
-            <p>{confirmRenameReplacement.message}</p>
-          </div>
-          <div className="modal-actions">
-            <button
-              type="button"
-              className="ghost-button"
-              onClick={() => setConfirmRenameReplacement(null)}
-            >
-              Cancel
-            </button>
-            <button
-              type="button"
-              className="primary-button"
-              onClick={() => {
-                const nextPayload = {
-                  ...confirmRenameReplacement.payload,
-                  confirmReplaceCustomRename: true,
-                };
-                const nextAppliedSections = confirmRenameReplacement.appliedSections;
-                setConfirmRenameReplacement(null);
-                void submitPolicyUpdate(nextPayload, nextAppliedSections).catch((error) => {
-                  setRenameRequestError(
-                    error instanceof Error
-                      ? error.message
-                      : "The rename policy could not be saved",
-                  );
-                });
-              }}
-            >
-              Replace regex
-            </button>
-          </div>
-        </Modal>
-      ) : null}
-    </>
+        ) : null}
+      </article>
+    </section>
   );
 }
 
@@ -2100,6 +2920,7 @@ function ArchiveSampleModal({
     <Modal
       title={sample ? "Edit Example File" : "Add Example File"}
       onClose={onClose}
+      showHeaderClose={false}
     >
       <div className="modal-copy">
         <strong>{descriptor.archiveDisplayName}</strong>
@@ -2171,7 +2992,7 @@ function ConfirmFixtureRemovalModal({
   onConfirm: () => void;
 }) {
   return (
-    <Modal title="Remove Example File" onClose={onClose}>
+    <Modal title="Remove Example File" onClose={onClose} showHeaderClose={false}>
       <div className="modal-copy">
         <strong>{sampleName}</strong>
         <p>This only removes the example file from the preview.</p>
@@ -2221,14 +3042,267 @@ function EmptyState({ title, body }: { title: string; body: string }) {
   );
 }
 
+function SourceListRowCard({
+  row,
+  rowOrder,
+  disabled,
+  onOpen,
+  onEdit,
+  onDelete,
+  onInfo,
+  onMove,
+}: {
+  row: ReturnType<typeof useSourceListController>["rows"][number];
+  rowOrder: SessionSourceReference[];
+  disabled: boolean;
+  onOpen: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+  onInfo: () => void;
+  onMove: (sourceRef: SessionSourceReference, targetIndex: number) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const dragHandleRef = useRef<HTMLButtonElement | null>(null);
+  const [closestEdge, setClosestEdge] = useState<Edge | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+  const currentIndex = rowOrder.indexOf(row.ref);
+  const sourceState = row.hydrationState;
+  const typeLabel = row.entry.scope.isArchiveSelection ? "ZIP" : "Folder";
+  const statusLabel = formatSourceStatus(sourceState?.status ?? "missing");
+  const combinedBadgeLabel = `${typeLabel} · ${statusLabel}`;
+  const combinedBadgeTitle = row.missingCache
+    ? "Refresh Database to load file cache before opening this source"
+    : undefined;
+
+  useEffect(() => {
+    const element = containerRef.current;
+    const dragHandle = dragHandleRef.current;
+    if (!element || !dragHandle || disabled || currentIndex < 0) {
+      return;
+    }
+
+    return combine(
+      draggable({
+        element,
+        dragHandle,
+        getInitialData: () => ({
+          type: "source-row",
+          sourceRef: row.ref,
+        }),
+        onDragStart: () => setIsDragging(true),
+        onDrop: () => setIsDragging(false),
+      }),
+      dropTargetForElements({
+        element,
+        canDrop: ({ source }) => {
+          return isSourceRowDragData(source.data) && source.data.sourceRef !== row.ref;
+        },
+        getData: ({ input, element: target }) =>
+          attachClosestEdge(
+            {
+              type: "source-row-target",
+              sourceRef: row.ref,
+            },
+            {
+              input,
+              element: target,
+              allowedEdges: ["top", "bottom"],
+            },
+          ),
+        onDragEnter: ({ self }) => {
+          setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDrag: ({ self }) => {
+          setClosestEdge(extractClosestEdge(self.data));
+        },
+        onDragLeave: () => {
+          setClosestEdge(null);
+        },
+        onDrop: ({ source, self }) => {
+          setClosestEdge(null);
+          const data = source.data;
+          if (!isSourceRowDragData(data)) {
+            return;
+          }
+          const startIndex = rowOrder.indexOf(data.sourceRef);
+          if (startIndex < 0) {
+            return;
+          }
+          const nextOrder = reorderWithEdge({
+            list: rowOrder,
+            startIndex,
+            indexOfTarget: currentIndex,
+            closestEdgeOfTarget: extractClosestEdge(self.data),
+            axis: "vertical",
+          });
+          const nextIndex = nextOrder.indexOf(data.sourceRef);
+          if (nextIndex < 0 || nextIndex === startIndex) {
+            return;
+          }
+          onMove(data.sourceRef, nextIndex);
+        },
+      }),
+    );
+  }, [currentIndex, disabled, onMove, row.ref, rowOrder]);
+
+  return (
+    <div
+      ref={containerRef}
+      className={`source-row${isDragging ? " is-dragging" : ""}`}
+    >
+      {closestEdge === "top" ? (
+        <div className="source-row-drop-indicator source-row-drop-indicator-top" aria-hidden="true">
+          <span />
+        </div>
+      ) : null}
+      {closestEdge === "bottom" ? (
+        <div
+          className="source-row-drop-indicator source-row-drop-indicator-bottom"
+          aria-hidden="true"
+        >
+          <span />
+        </div>
+      ) : null}
+      <div className="source-row-shell">
+        <button
+          ref={dragHandleRef}
+          type="button"
+          className="source-drag-handle"
+          disabled={disabled}
+          aria-label={`Reorder ${row.entry.displayName}`}
+          title={`Reorder ${row.entry.displayName}`}
+        >
+          <span aria-hidden="true">⋮⋮</span>
+        </button>
+        <div className="source-row-main">
+          <div className="source-row-header">
+            <button
+              type="button"
+              className="source-open-button"
+              disabled={disabled}
+              onClick={onOpen}
+            >
+              <strong>{row.entry.displayName}</strong>
+            </button>
+          </div>
+          <div className="source-row-controls">
+            <SourceRowBadge
+              variant={row.entry.scope.isArchiveSelection ? "zip" : "folder"}
+              title={combinedBadgeTitle}
+            >
+              {combinedBadgeLabel}
+            </SourceRowBadge>
+            <div className="source-row-action-buttons">
+              <button
+                type="button"
+                className="info-button"
+                disabled={disabled}
+                onClick={onEdit}
+                aria-label={`Edit ${row.entry.displayName}`}
+                title="Edit source"
+              >
+                ✎
+              </button>
+              <button
+                type="button"
+                className="info-button"
+                disabled={disabled}
+                onClick={onDelete}
+                aria-label={`Delete ${row.entry.displayName}`}
+                title="Delete source"
+              >
+                ×
+              </button>
+              <button
+                type="button"
+                className="info-button"
+                disabled={disabled}
+                onClick={onInfo}
+                aria-label={`Show info for ${row.entry.displayName}`}
+                title="View source info"
+              >
+                i
+              </button>
+            </div>
+          </div>
+          <details className="source-details">
+            <summary>Path and folder</summary>
+            <dl className="source-details-grid">
+              <DetailRow label="Subfolder" value={row.entry.subfolder} />
+              <DetailRow label="Path" value={row.entry.scope.normalizedPath} />
+            </dl>
+          </details>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function SourceRowBadge({
+  children,
+  title,
+  variant = "neutral",
+}: {
+  children: ReactNode;
+  title?: string;
+  variant?: "neutral" | "zip" | "folder";
+}) {
+  return (
+    <span className={`source-row-badge source-row-badge-${variant}`} title={title}>
+      {children}
+    </span>
+  );
+}
+
+function BlockedDocumentPanel({
+  groups,
+  onReload,
+}: {
+  groups: BlockedIssueGroup[];
+  onReload: () => void;
+}) {
+  return (
+    <article className="panel">
+      <div className="validation-header">
+        <div>
+          <h2>Editor Unavailable</h2>
+          <p>
+            This editor cannot open the current source.json until the issues below are fixed.
+            Edit source.json directly, then reload.
+          </p>
+        </div>
+        <button type="button" className="ghost-button" onClick={onReload}>
+          Reload source.json
+        </button>
+      </div>
+      <div className="error-box">
+        {groups.map((group) => (
+          <div key={group.family}>
+            <h3>{group.heading}</h3>
+            <ul className="issue-list">
+              {group.issues.map((issue) => (
+                <li key={`${issue.code}-${issue.message}`}>
+                  <span>{issue.message}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ))}
+      </div>
+    </article>
+  );
+}
+
 function Modal({
   title,
   children,
   onClose,
+  showHeaderClose = true,
 }: {
   title: string;
   children: ReactNode;
   onClose: () => void;
+  showHeaderClose?: boolean;
 }) {
   return (
     <div className="modal-backdrop" role="presentation" onClick={onClose}>
@@ -2241,9 +3315,11 @@ function Modal({
       >
         <div className="modal-header">
           <h2>{title}</h2>
-          <button type="button" className="ghost-button" onClick={onClose}>
-            Close
-          </button>
+          {showHeaderClose ? (
+            <button type="button" className="ghost-button" onClick={onClose}>
+              Close
+            </button>
+          ) : null}
         </div>
         <div className="modal-body">{children}</div>
       </div>
@@ -2496,27 +3572,24 @@ function treePathKey(segments: string[]) {
   return segments.join("/");
 }
 
-function normalizeSourcePolicyGlobs(values: string[]) {
-  return [...new Set(values.map((value) => value.trim()).filter((value) => value.length > 0))].sort();
-}
-
-function sameStringArray(left: string[], right: string[]) {
-  return left.length === right.length && left.every((value, index) => value === right[index]);
-}
-
-function filterSourceFilesByIgnoreGlobs(sourceFiles: SourceFileRow[], ignoreGlobs: string[]) {
-  const matcher = compileIgnoreMatcher(ignoreGlobs);
-  return sourceFiles.filter((file) => !matcher(file.originalName));
-}
-
-function shouldShowRenameHint(entry: PreviewEntry, file: SourceFileRow) {
-  if (!entry.renameRule) {
-    return false;
+function formatDraftStatusSummary({
+  dirty,
+  dirtyEntryCount,
+  baselineEntryCount,
+  draftEntryCount,
+}: {
+  dirty: boolean;
+  dirtyEntryCount: number;
+  baselineEntryCount: number;
+  draftEntryCount: number;
+}) {
+  if (!dirty) {
+    return "No unsaved changes";
   }
-  if (entry.unarchive && file.isArchiveCandidate && isSupportedArchiveName(file.originalName)) {
-    return false;
+  if (baselineEntryCount !== draftEntryCount || dirtyEntryCount <= 0) {
+    return "Unsaved changes";
   }
-  return applyRenameRule(entry.renameRule, file.originalName) !== file.originalName;
+  return `${dirtyEntryCount} unsaved change${dirtyEntryCount === 1 ? "" : "s"}`;
 }
 
 function formatSourceStatus(status: SourceFilesState["sourceStatus"] | "missing") {
@@ -2531,6 +3604,12 @@ function formatSourceStatus(status: SourceFilesState["sourceStatus"] | "missing"
     default:
       return "Not loaded yet";
   }
+}
+
+function isSourceRowDragData(
+  data: Record<string | symbol, unknown>,
+): data is SourceRowDragData {
+  return data.type === "source-row" && typeof data.sourceRef === "string";
 }
 
 function CopyStemButton({ filename }: { filename: string }) {

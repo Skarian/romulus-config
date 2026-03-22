@@ -2,30 +2,27 @@ import fs from "node:fs";
 import path from "node:path";
 
 import { normalizeArchiveSampleExtensions } from "../archiveSamplePolicy";
-import {
-  analyzeParentheticalSuffixes,
-  buildManagedRenameRule,
-  detectManagedRenamePolicy,
-} from "../policyAnalysis";
 import { buildPreviewEntries } from "../runtimeValidation";
 import { buildSimulatorState } from "../simulatorState";
 import {
-  readSourceDocument,
-  validateSourceDocument,
-  writeSourceDocumentAtomic,
+  commitSourceDocumentSavePreview,
+  getSourceDocumentPaths,
 } from "../sourceDocument";
 import type {
+  ClearLocalDataResult,
+  ClearLocalDataSelection,
   HydrationLogEntry,
   HydrationLogLevel,
   HydrationLogVisibility,
+  HydrationRunSummary,
   PreviewFixture,
   PreviewFixtureSample,
-  HydrationSourceState,
-  PreviewEntry,
-  SourceDocument,
-  SimulatorState,
-  SourceFilesState,
-} from "../types";
+    HydrationSourceState,
+    PreviewEntry,
+    SimulatorState,
+    SourceFilesRequest,
+    SourceFilesState,
+  } from "../types";
 import {
   createErrorCacheRow,
   createPreparingArchiveCacheRow,
@@ -59,31 +56,6 @@ type BackendEvent = {
 
 type BackendSubscriber = (event: BackendEvent) => void;
 
-export type SourceEntryPolicyUpdateInput = {
-  entryId: string;
-  selectionStateKey: string;
-  displayName: string;
-  subfolder: string;
-  renamePolicy?: {
-    mode: "none" | "all" | "phrases";
-    phrases: string[];
-  };
-  ignoreGlobs?: string[];
-  confirmReplaceCustomRename?: boolean;
-};
-
-export type SourceEntryPolicyUpdateResult =
-  | {
-      status: "ok";
-    }
-  | {
-      status: "needs-confirmation";
-      kind: "custom-rename";
-      error: string;
-    };
-
-const MAX_LOGS = 300;
-
 class RetryableArchiveHydrationError extends Error {
   constructor(message: string) {
     super(message);
@@ -94,8 +66,8 @@ class RetryableArchiveHydrationError extends Error {
 export class SimulatorBackend {
   private readonly cacheDb: SimulatorCacheDb;
   private readonly subscribers = new Set<BackendSubscriber>();
-  private readonly logEntries: HydrationLogEntry[] = [];
   private hydrationRunning = false;
+  private currentRunId: number | null = null;
   private currentRunPromise: Promise<void> | null = null;
 
   constructor(
@@ -108,10 +80,12 @@ export class SimulatorBackend {
   }
 
   buildState(): SimulatorState {
+    const latestRunId = this.currentRunId ?? this.cacheDb.getLatestHydrationRunId();
     const baseState = buildSimulatorState(this.repoRoot, {
       running: this.hydrationRunning,
       apiKeyConfigured: this.apiKey.trim().length > 0,
-      logs: [...this.logEntries],
+      logs: this.cacheDb.listHydrationLogs(latestRunId),
+      lastRun: this.cacheDb.getLatestHydrationRunSummary(),
     });
     const sourceStates: Record<string, HydrationSourceState> = {};
     const missingSourceIds: string[] = [];
@@ -147,33 +121,35 @@ export class SimulatorBackend {
       ...baseState,
       hydration: {
         lastHydratedAt: this.cacheDb.getLatestFinishedHydrationAt(),
+        lastRun: this.cacheDb.getLatestHydrationRunSummary(),
         missingSourceIds,
         running: this.hydrationRunning,
         apiKeyConfigured: this.apiKey.trim().length > 0,
-        logs: [...this.logEntries],
+        logs: this.cacheDb.listHydrationLogs(latestRunId),
         sourceStates,
       },
     };
   }
 
-  getSourceFiles(entryId: string): SourceFilesState {
-    const state = this.buildState();
-    const entry = state.entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      throw new Error(`Unknown source entry: ${entryId}`);
-    }
-
-    const cached = this.cacheDb.getSourceCache(entry.hydrationKey);
-    const previewFixtures = this.cacheDb.listPreviewFixtures(entry.hydrationKey);
-    const archiveSampleExtensions = this.cacheDb.getArchiveSampleExtensions(entry.hydrationKey);
-    const persistedSelectedRowIds = this.cacheDb.getSelectedRowIds(entry.selectionStateKey, {
-      previousEntryId: entry.id,
-      hydrationKey: entry.hydrationKey,
+  getSourceFiles(request: SourceFilesRequest): SourceFilesState {
+    const cached = this.cacheDb.getSourceCache(request.hydrationKey);
+    const previewFixtures = this.cacheDb.listPreviewFixtures(request.hydrationKey);
+    const archiveSampleExtensions = this.cacheDb.getArchiveSampleExtensions(
+      request.selectionStateKey,
+      {
+        hydrationKey: request.hydrationKey,
+      },
+    );
+    const persistedSelectedRowIds = this.cacheDb.getSelectedRowIds(request.selectionStateKey, {
+      previousEntryId: request.legacyEntryId,
+      hydrationKey: request.hydrationKey,
     });
-    const sourceMode = entry.scope.isArchiveSelection ? "archive" : "standard";
+    const sourceMode = request.scope.isArchiveSelection ? "archive" : "standard";
     if (!cached) {
       return {
-        entryId,
+        hydrationKey: request.hydrationKey,
+        selectionStateKey: request.selectionStateKey,
+        entryId: request.legacyEntryId ?? null,
         sourceStatus: "missing",
         sourceMode,
         updatedAt: null,
@@ -185,6 +161,7 @@ export class SimulatorBackend {
         previewFixtures,
         analysisFiles: [],
         analysisOriginalNames: [],
+        scopedOutFileCount: 0,
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
@@ -192,7 +169,9 @@ export class SimulatorBackend {
 
     if (cached.status === "error") {
       return {
-        entryId,
+        hydrationKey: request.hydrationKey,
+        selectionStateKey: request.selectionStateKey,
+        entryId: request.legacyEntryId ?? null,
         sourceStatus: "error",
         sourceMode: cached.mode,
         updatedAt: cached.updatedAt,
@@ -204,6 +183,7 @@ export class SimulatorBackend {
         previewFixtures,
         analysisFiles: [],
         analysisOriginalNames: [],
+        scopedOutFileCount: 0,
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
@@ -211,7 +191,9 @@ export class SimulatorBackend {
 
     if (cached.status === "preparing") {
       return {
-        entryId,
+        hydrationKey: request.hydrationKey,
+        selectionStateKey: request.selectionStateKey,
+        entryId: request.legacyEntryId ?? null,
         sourceStatus: "preparing",
         sourceMode: cached.mode,
         updatedAt: cached.updatedAt,
@@ -225,6 +207,7 @@ export class SimulatorBackend {
         previewFixtures,
         analysisFiles: [],
         analysisOriginalNames: [],
+        scopedOutFileCount: 0,
         selectedRowIds: persistedSelectedRowIds,
         files: [],
       };
@@ -232,31 +215,37 @@ export class SimulatorBackend {
 
     const analysisFiles =
       cached.mode === "standard" && isReadyStandardPayload(cached.payload)
-        ? buildScopedStandardSourceFiles(entry, cached.payload.files)
+        ? buildScopedStandardSourceFiles(request, cached.payload.files)
         : cached.mode === "archive" &&
             isArchivePayload(cached.payload) &&
             cached.payload.entries
           ? buildScopedArchiveSourceFiles(cached.payload.entries)
           : [];
     const analysisOriginalNames = analysisFiles.map((file) => file.originalName);
+    const scopedOutFileCount =
+      cached.mode === "standard" && isReadyStandardPayload(cached.payload)
+        ? Math.max(cached.payload.files.length - analysisFiles.length, 0)
+        : 0;
     const files =
       cached.mode === "standard" && isReadyStandardPayload(cached.payload)
-        ? buildStandardSourceFiles(entry, cached.payload.files)
+        ? buildStandardSourceFiles(request, cached.payload.files)
         : cached.mode === "archive" &&
             isArchivePayload(cached.payload) &&
             cached.payload.entries
-          ? buildArchiveSourceFiles(entry, cached.payload.entries)
+          ? buildArchiveSourceFiles(request, cached.payload.entries)
           : [];
     const availableFileIds = new Set(files.map((file) => file.id));
     const selectedRowIds = persistedSelectedRowIds.filter((fileId) =>
       availableFileIds.has(fileId),
     );
     if (selectedRowIds.length !== persistedSelectedRowIds.length) {
-      this.cacheDb.setSelectedRowIds(entry.selectionStateKey, selectedRowIds);
+      this.cacheDb.setSelectedRowIds(request.selectionStateKey, selectedRowIds);
     }
 
     return {
-      entryId,
+      hydrationKey: request.hydrationKey,
+      selectionStateKey: request.selectionStateKey,
+      entryId: request.legacyEntryId ?? null,
       sourceStatus: "ready",
       sourceMode: cached.mode,
       updatedAt: cached.updatedAt,
@@ -272,6 +261,7 @@ export class SimulatorBackend {
           : null,
       archiveSampleExtensions,
       previewFixtures,
+      scopedOutFileCount,
       selectedRowIds,
       files,
     };
@@ -299,8 +289,8 @@ export class SimulatorBackend {
     }
 
     const state = this.buildState();
-    if (state.status !== "accepted") {
-      throw new Error("Config must be accepted before the database can be updated");
+    if (state.status !== "editable") {
+      throw new Error("Config must be editable before the database can be updated");
     }
     if (this.apiKey.trim().length === 0) {
       throw new Error("REAL_DEBRID_API_KEY is missing in simulator/.env.local");
@@ -309,10 +299,8 @@ export class SimulatorBackend {
     const entries = uniqueEntriesByHydrationKey(state.entries.filter(
       (entry) => !entryIds || entryIds.includes(entry.id),
     ));
-    if (options.forceRefresh) {
-      for (const entry of entries) {
-        this.cacheDb.clearSourceCache(entry.hydrationKey);
-      }
+    if (entries.length === 0) {
+      throw new Error("No source cache jobs were selected");
     }
     const client = new RealDebridClient(this.apiKey, {
       onLog: (message, visibility = "verbose") => {
@@ -321,6 +309,7 @@ export class SimulatorBackend {
       },
     });
     const runId = this.cacheDb.startHydrationRun(entries.length);
+    this.currentRunId = runId;
     this.hydrationRunning = true;
     this.publishState();
     this.log("info", `Starting database hydration for ${entries.length} source cache job(s).`);
@@ -331,24 +320,29 @@ export class SimulatorBackend {
     );
 
     const runPromise = (async () => {
+      let successCount = 0;
       let failureCount = 0;
       try {
         for (const [index, entry] of entries.entries()) {
+          const previousCache = this.cacheDb.getSourceCache(entry.hydrationKey);
           this.log(
             "info",
             `Hydrating source cache ${index + 1}/${entries.length}: ${entry.displayName} (${entry.scope.isArchiveSelection ? "archive" : "standard"}).`,
           );
           try {
             if (entry.scope.isArchiveSelection) {
-              await this.hydrateArchiveEntry(client, entry);
+              await this.hydrateArchiveEntry(client, entry, options.forceRefresh ?? false);
             } else {
               await this.hydrateStandardEntry(client, entry);
             }
+            successCount += 1;
             this.log("success", `${entry.displayName}: source hydration completed.`);
           } catch (error) {
             failureCount += 1;
             const message = error instanceof Error ? error.message : String(error);
-            if (!(error instanceof RetryableArchiveHydrationError)) {
+            if (previousCache) {
+              this.cacheDb.setSourceCache(previousCache);
+            } else if (!(error instanceof RetryableArchiveHydrationError)) {
               this.cacheDb.setSourceCache(
                 createErrorCacheRow(
                   entry.hydrationKey,
@@ -369,14 +363,27 @@ export class SimulatorBackend {
         this.cacheDb.finishHydrationRun(
           runId,
           failureCount > 0 ? "failed" : "completed",
+          {
+            successCount,
+            failureCount,
+          },
           failureCount > 0 ? `${failureCount} source(s) failed during hydration.` : null,
         );
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.cacheDb.finishHydrationRun(runId, "failed", message);
+        this.cacheDb.finishHydrationRun(
+          runId,
+          "failed",
+          {
+            successCount,
+            failureCount,
+          },
+          message,
+        );
         throw error;
       } finally {
         this.hydrationRunning = false;
+        this.currentRunId = null;
         this.currentRunPromise = null;
         this.publishState();
       }
@@ -387,8 +394,28 @@ export class SimulatorBackend {
     return runPromise;
   }
 
+  clearLocalData(selection: ClearLocalDataSelection): ClearLocalDataResult {
+    const normalizedSelection = {
+      fileCache: Boolean(selection.fileCache),
+      savedSelections: Boolean(selection.savedSelections),
+      savedPreviewData: Boolean(selection.savedPreviewData),
+      updateLogs: Boolean(selection.updateLogs),
+    };
+    if (!Object.values(normalizedSelection).some(Boolean)) {
+      throw new Error("Select at least one local database category to clear");
+    }
+    if (this.hydrationRunning) {
+      throw new Error("The local database cannot be cleared while Update Database is running");
+    }
+    this.cacheDb.clearLocalData(normalizedSelection);
+    this.publishState();
+    return {
+      cleared: normalizedSelection,
+    };
+  }
+
   setPreviewFixture(
-    entryId: string,
+    hydrationKey: string,
     fixtureInput: {
       fixtureKey?: string;
       sourceFileId: string | null;
@@ -397,16 +424,10 @@ export class SimulatorBackend {
       samples: PreviewFixtureSample[];
     },
   ): PreviewFixture {
-    const state = this.buildState();
-    const entry = state.entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      throw new Error(`Unknown source entry: ${entryId}`);
-    }
-
     const fixtureKey =
       fixtureInput.fixtureKey ??
-      previewFixtureKey(entry.hydrationKey, fixtureInput.sourceFileId);
-    return this.cacheDb.setPreviewFixture(entry.hydrationKey, {
+      previewFixtureKey(hydrationKey, fixtureInput.sourceFileId);
+    return this.cacheDb.setPreviewFixture(hydrationKey, {
       fixtureKey,
       sourceFileId: fixtureInput.sourceFileId,
       archiveDisplayName: fixtureInput.archiveDisplayName,
@@ -415,120 +436,43 @@ export class SimulatorBackend {
     });
   }
 
-  setArchiveSampleExtensions(entryId: string, fileExtensions: string[]) {
-    const state = this.buildState();
-    const entry = state.entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      throw new Error(`Unknown source entry: ${entryId}`);
-    }
-    if (!entry.unarchive) {
+  setArchiveSampleExtensions(
+    request: {
+      selectionStateKey: string;
+      unarchiveEnabled: boolean;
+    },
+    fileExtensions: string[],
+  ) {
+    if (!request.unarchiveEnabled) {
       throw new Error("Unarchive must be configured before saving archive sample extensions");
     }
 
     return this.cacheDb.setArchiveSampleExtensions(
-      entry.hydrationKey,
+      request.selectionStateKey,
       normalizeArchiveSampleExtensions(fileExtensions),
     );
   }
 
-  setSelectedRowIds(entryId: string, selectedRowIds: string[]) {
-    const state = this.buildState();
-    const entry = state.entries.find((candidate) => candidate.id === entryId);
-    if (!entry) {
-      throw new Error(`Unknown source entry: ${entryId}`);
-    }
-
+  setSelectedRowIds(request: SourceFilesRequest, selectedRowIds: string[]) {
     const normalizedSelectedRowIds = Array.from(
       new Set(selectedRowIds.filter((rowId) => rowId.trim().length > 0)),
     );
-    const sourceFiles = this.getSourceFiles(entryId);
+    const sourceFiles = this.getSourceFiles(request);
     const availableFileIds = new Set(sourceFiles.files.map((file) => file.id));
     const nextSelectedRowIds =
       sourceFiles.sourceStatus === "ready"
         ? normalizedSelectedRowIds.filter((rowId) => availableFileIds.has(rowId))
         : normalizedSelectedRowIds;
-    this.cacheDb.setSelectedRowIds(entry.selectionStateKey, nextSelectedRowIds);
+    this.cacheDb.setSelectedRowIds(request.selectionStateKey, nextSelectedRowIds);
     return nextSelectedRowIds;
   }
 
-  updateSourceEntryPolicy(
-    input: SourceEntryPolicyUpdateInput,
-  ): SourceEntryPolicyUpdateResult {
-    assertValidSourceEntryPolicyUpdateInput(input);
-    const state = this.buildState();
-    if (state.status !== "accepted") {
-      throw new Error("Config must be accepted before source policies can be edited");
-    }
-
-    const entry = resolveSelectedEntry(state.entries, input);
-    if (!entry) {
-      throw new Error("The selected source changed on disk. Reload the simulator state and try again.");
-    }
-
-    const sourceFiles = this.getSourceFiles(entry.id);
-    if (sourceFiles.sourceStatus !== "ready") {
-      throw new Error("Source files must be loaded before policies can be edited");
-    }
-
-    const analysis = analyzeParentheticalSuffixes(
-      sourceFiles.analysisOriginalNames ?? sourceFiles.files.map((file) => file.originalName),
-    );
-    if (input.renamePolicy) {
-      const detectedRenamePolicy = detectManagedRenamePolicy(
-        entry.renameRule,
-        analysis.parentheticalPhrases.map((phrase) => phrase.phrase),
-      );
-      if (detectedRenamePolicy.isCustom && !input.confirmReplaceCustomRename) {
-        return {
-          status: "needs-confirmation",
-          kind: "custom-rename",
-          error:
-            "This source already has a custom rename regex. Confirm replacement before overwriting it.",
-        };
-      }
-    }
-
-    const { configPath, schemaPath, rawDocument } = readSourceDocument(this.repoRoot);
-    const entries = rawDocument.entries;
-    if (!Array.isArray(entries)) {
-      throw new Error("The selected source could not be located in source.json");
-    }
-
-    const targetIndex = resolveSourceEntryWriteIndex(rawDocument as SourceDocument, entry);
-    if (targetIndex < 0 || targetIndex >= entries.length) {
-      throw new Error("The selected source changed on disk. Reload the simulator state and try again.");
-    }
-
-    const targetEntry = entries[targetIndex];
-    if (!targetEntry || typeof targetEntry !== "object" || Array.isArray(targetEntry)) {
-      throw new Error("The selected source entry is not editable");
-    }
-
-    if (input.renamePolicy) {
-      const availablePhrases = analysis.parentheticalPhrases.map((phrase) => phrase.phrase);
-      const nextRenameRule = buildManagedRenameRule(
-        input.renamePolicy.mode,
-        input.renamePolicy.phrases,
-        availablePhrases,
-      );
-      applyRenameRuleToDocumentEntry(targetEntry, nextRenameRule);
-    }
-    if (input.ignoreGlobs) {
-      applyIgnoreGlobsToDocumentEntry(
-        targetEntry,
-        normalizeIgnoreGlobs(input.ignoreGlobs),
-      );
-    }
-
-    const issues = validateSourceDocument(rawDocument as SourceDocument, schemaPath);
-    if (issues.length > 0) {
-      throw new Error(issues[0]?.message ?? "The updated source.json would be invalid");
-    }
-
-    writeSourceDocumentAtomic(configPath, rawDocument);
-    return {
-      status: "ok",
-    };
+  saveDocumentPreview(preview: {
+    checksum: string;
+    text: string;
+  }) {
+    const { configPath } = getSourceDocumentPaths(this.repoRoot);
+    commitSourceDocumentSavePreview(configPath, preview);
   }
 
   private async hydrateStandardEntry(
@@ -553,12 +497,14 @@ export class SimulatorBackend {
   private async hydrateArchiveEntry(
     client: RealDebridClient,
     entry: PreviewEntry,
+    forceRefresh: boolean,
   ) {
     const existing = this.cacheDb.getSourceCache(entry.hydrationKey);
     let exactMatch: CachedProviderFileRecord;
     let status: AcquisitionStatus;
 
     if (
+      !forceRefresh &&
       existing?.status === "preparing" &&
       isArchivePayload(existing.payload) &&
       existing.payload.resumeMarker
@@ -670,15 +616,14 @@ export class SimulatorBackend {
   ) {
     const normalizedMessage = normalizeLogMessage(message);
     const entry: HydrationLogEntry = {
-      id: `${Date.now()}-${this.logEntries.length}`,
+      id: `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`,
       timestamp: new Date().toISOString(),
       level,
       visibility,
       message: normalizedMessage,
     };
-    this.logEntries.push(entry);
-    if (this.logEntries.length > MAX_LOGS) {
-      this.logEntries.splice(0, this.logEntries.length - MAX_LOGS);
+    if (this.currentRunId !== null) {
+      this.cacheDb.appendHydrationLog(this.currentRunId, entry);
     }
 
     const label = level.toUpperCase();
@@ -713,96 +658,6 @@ function normalizeLogMessage(message: string) {
   return message.endsWith(".") && !message.endsWith("...") ? message.slice(0, -1) : message;
 }
 
-function normalizeIgnoreGlobs(ignoreGlobs: string[]) {
-  return Array.from(
-    new Set(ignoreGlobs.map((glob) => glob.trim()).filter((glob) => glob.length > 0)),
-  );
-}
-
-function assertValidSourceEntryPolicyUpdateInput(
-  input: SourceEntryPolicyUpdateInput,
-) {
-  if (typeof input.entryId !== "string" || input.entryId.trim().length === 0) {
-    throw new Error("Invalid source entry policy payload");
-  }
-  if (
-    typeof input.selectionStateKey !== "string" ||
-    input.selectionStateKey.trim().length === 0 ||
-    typeof input.displayName !== "string" ||
-    input.displayName.trim().length === 0 ||
-    typeof input.subfolder !== "string" ||
-    input.subfolder.trim().length === 0
-  ) {
-    throw new Error("Invalid source entry policy payload");
-  }
-
-  if (input.renamePolicy) {
-    if (
-      !["none", "all", "phrases"].includes(input.renamePolicy.mode) ||
-      !Array.isArray(input.renamePolicy.phrases) ||
-      input.renamePolicy.phrases.some((phrase) => typeof phrase !== "string")
-    ) {
-      throw new Error("Invalid source entry policy payload");
-    }
-  }
-
-  if (
-    input.ignoreGlobs &&
-    (!Array.isArray(input.ignoreGlobs) ||
-      input.ignoreGlobs.some((glob) => typeof glob !== "string"))
-  ) {
-    throw new Error("Invalid source entry policy payload");
-  }
-
-  if (
-    typeof input.confirmReplaceCustomRename !== "undefined" &&
-    typeof input.confirmReplaceCustomRename !== "boolean"
-  ) {
-    throw new Error("Invalid source entry policy payload");
-  }
-}
-
-function applyRenameRuleToDocumentEntry(
-  entry: Record<string, unknown>,
-  renameRule: PreviewEntry["renameRule"],
-) {
-  if (!renameRule) {
-    delete entry.rename;
-    return;
-  }
-
-  entry.rename = {
-    pattern: renameRule.pattern,
-    replacement: renameRule.replacement,
-  };
-}
-
-function applyIgnoreGlobsToDocumentEntry(
-  entry: Record<string, unknown>,
-  ignoreGlobs: string[],
-) {
-  if (ignoreGlobs.length === 0) {
-    if (
-      entry.ignore &&
-      typeof entry.ignore === "object" &&
-      !Array.isArray(entry.ignore)
-    ) {
-      delete (entry.ignore as Record<string, unknown>).glob;
-      if (Object.keys(entry.ignore as Record<string, unknown>).length === 0) {
-        delete entry.ignore;
-      }
-    } else {
-      delete entry.ignore;
-    }
-    return;
-  }
-
-  if (!entry.ignore || typeof entry.ignore !== "object" || Array.isArray(entry.ignore)) {
-    entry.ignore = {};
-  }
-  (entry.ignore as Record<string, unknown>).glob = ignoreGlobs;
-}
-
 export function ensureLocalArtifacts(repoRoot: string) {
   fs.mkdirSync(path.join(repoRoot, "simulator/.local"), { recursive: true });
 }
@@ -824,50 +679,4 @@ function uniqueEntriesByHydrationKey(entries: PreviewEntry[]) {
     }
   }
   return [...uniqueEntries.values()];
-}
-
-function resolveSourceEntryWriteIndex(
-  document: SourceDocument,
-  selectedEntry: PreviewEntry,
-) {
-  const freshEntries = buildPreviewEntries(document);
-  const exactIndex = freshEntries.findIndex((candidate) => candidate.id === selectedEntry.id);
-  if (exactIndex >= 0) {
-    return exactIndex;
-  }
-
-  const fallbackMatches = freshEntries
-    .map((candidate, index) => ({ candidate, index }))
-    .filter(
-      ({ candidate }) =>
-        candidate.selectionStateKey === selectedEntry.selectionStateKey &&
-        candidate.displayName === selectedEntry.displayName &&
-        candidate.subfolder === selectedEntry.subfolder,
-    );
-  if (fallbackMatches.length === 1) {
-    return fallbackMatches[0].index;
-  }
-
-  return -1;
-}
-
-function resolveSelectedEntry(
-  entries: PreviewEntry[],
-  input: Pick<
-    SourceEntryPolicyUpdateInput,
-    "entryId" | "selectionStateKey" | "displayName" | "subfolder"
-  >,
-) {
-  const exactMatch = entries.find((candidate) => candidate.id === input.entryId);
-  if (exactMatch) {
-    return exactMatch;
-  }
-
-  const fallbackMatches = entries.filter(
-    (candidate) =>
-      candidate.selectionStateKey === input.selectionStateKey &&
-      candidate.displayName === input.displayName &&
-      candidate.subfolder === input.subfolder,
-  );
-  return fallbackMatches.length === 1 ? fallbackMatches[0] : null;
 }

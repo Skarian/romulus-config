@@ -5,6 +5,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv, type Plugin } from "vite";
 
 import { SimulatorBackend, ensureLocalArtifacts } from "./src/server/backend";
+import type { NormalizedScope, SourceFilesRequest } from "./src/types";
 
 const VIRTUAL_ID = "virtual:romulus-simulator-state";
 const RESOLVED_VIRTUAL_ID = `\0${VIRTUAL_ID}`;
@@ -43,23 +44,32 @@ function simulatorStatePlugin(): Plugin {
         response.setHeader("Content-Type", "application/json");
         response.end(JSON.stringify(backend.buildState()));
       });
-      server.middlewares.use("/__simulator/source-files", (request, response) => {
-        const url = new URL(request.url ?? "", "http://127.0.0.1");
-        const entryId = url.searchParams.get("entryId");
-        if (!entryId) {
+      server.middlewares.use("/__simulator/source-files", async (request, response) => {
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end("Method not allowed");
+          return;
+        }
+
+        const rawBody = await readRequestBody(request);
+        const parsedRequest = parseSourceFilesRequest(
+          rawBody.trim().length === 0 ? null : JSON.parse(rawBody),
+        );
+        if (!parsedRequest) {
           response.statusCode = 400;
-          response.end("entryId is required");
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify({ error: "Invalid source files payload" }));
           return;
         }
 
         try {
           response.setHeader("Content-Type", "application/json");
-          response.end(JSON.stringify(backend.getSourceFiles(entryId)));
+          response.end(JSON.stringify(backend.getSourceFiles(parsedRequest)));
         } catch (error) {
           response.statusCode = 400;
           response.end(
             JSON.stringify({
-              error: error instanceof Error ? error.message : "Unknown source entry",
+              error: error instanceof Error ? error.message : "Source files could not be loaded",
             }),
           );
         }
@@ -103,7 +113,7 @@ function simulatorStatePlugin(): Plugin {
 
         const rawBody = await readRequestBody(request);
         const parsedBody = JSON.parse(rawBody) as {
-          entryId?: string;
+          hydrationKey?: string;
           fixtureKey?: string;
           sourceFileId?: string | null;
           archiveDisplayName?: string;
@@ -116,7 +126,7 @@ function simulatorStatePlugin(): Plugin {
           }>;
         };
         if (
-          !parsedBody.entryId ||
+          !parsedBody.hydrationKey ||
           !parsedBody.archiveDisplayName ||
           !parsedBody.archiveBaseName ||
           !Array.isArray(parsedBody.samples)
@@ -128,7 +138,7 @@ function simulatorStatePlugin(): Plugin {
         }
 
         try {
-          const fixture = backend.setPreviewFixture(parsedBody.entryId, {
+          const fixture = backend.setPreviewFixture(parsedBody.hydrationKey, {
             fixtureKey: parsedBody.fixtureKey,
             sourceFileId: parsedBody.sourceFileId ?? null,
             archiveDisplayName: parsedBody.archiveDisplayName,
@@ -162,11 +172,13 @@ function simulatorStatePlugin(): Plugin {
 
         const rawBody = await readRequestBody(request);
         const parsedBody = JSON.parse(rawBody) as {
-          entryId?: string;
+          selectionStateKey?: string;
+          unarchiveEnabled?: boolean;
           fileExtensions?: string[];
         };
         if (
-          !parsedBody.entryId ||
+          !parsedBody.selectionStateKey ||
+          typeof parsedBody.unarchiveEnabled !== "boolean" ||
           !Array.isArray(parsedBody.fileExtensions) ||
           parsedBody.fileExtensions.some((value) => typeof value !== "string")
         ) {
@@ -178,7 +190,10 @@ function simulatorStatePlugin(): Plugin {
 
         try {
           const policy = backend.setArchiveSampleExtensions(
-            parsedBody.entryId,
+            {
+              selectionStateKey: parsedBody.selectionStateKey,
+              unarchiveEnabled: parsedBody.unarchiveEnabled,
+            },
             parsedBody.fileExtensions,
           );
           response.statusCode = 200;
@@ -206,10 +221,11 @@ function simulatorStatePlugin(): Plugin {
 
         const rawBody = await readRequestBody(request);
         const parsedBody = JSON.parse(rawBody) as {
-          entryId?: string;
+          source?: SourceFilesRequest;
           selectedRowIds?: string[];
         };
-        if (!parsedBody.entryId || !Array.isArray(parsedBody.selectedRowIds)) {
+        const parsedRequest = parseSourceFilesRequest(parsedBody.source);
+        if (!parsedRequest || !Array.isArray(parsedBody.selectedRowIds)) {
           response.statusCode = 400;
           response.setHeader("Content-Type", "application/json");
           response.end(JSON.stringify({ error: "Invalid selected files payload" }));
@@ -218,7 +234,7 @@ function simulatorStatePlugin(): Plugin {
 
         try {
           const selectedRowIds = backend.setSelectedRowIds(
-            parsedBody.entryId,
+            parsedRequest,
             parsedBody.selectedRowIds,
           );
           response.statusCode = 200;
@@ -237,7 +253,7 @@ function simulatorStatePlugin(): Plugin {
           );
         }
       });
-      server.middlewares.use("/__simulator/source-entry-policy", async (request, response) => {
+      server.middlewares.use("/__simulator/save-document", async (request, response) => {
         if (request.method !== "POST") {
           response.statusCode = 405;
           response.end("Method not allowed");
@@ -247,54 +263,72 @@ function simulatorStatePlugin(): Plugin {
         try {
           const rawBody = await readRequestBody(request);
           const parsedBody = JSON.parse(rawBody) as {
-            entryId?: string;
-            selectionStateKey?: string;
-            displayName?: string;
-            subfolder?: string;
-            renamePolicy?: {
-              mode?: "none" | "all" | "phrases";
-              phrases?: string[];
+            preview?: {
+              checksum?: string;
+              text?: string;
             };
-            ignoreGlobs?: string[];
-            confirmReplaceCustomRename?: unknown;
           };
-
           if (
-            !parsedBody.entryId ||
-            !parsedBody.selectionStateKey ||
-            !parsedBody.displayName ||
-            !parsedBody.subfolder ||
-            (!parsedBody.renamePolicy && !Array.isArray(parsedBody.ignoreGlobs)) ||
-            (parsedBody.renamePolicy &&
-              (!parsedBody.renamePolicy.mode ||
-                !Array.isArray(parsedBody.renamePolicy.phrases)))
+            !parsedBody.preview ||
+            typeof parsedBody.preview.checksum !== "string" ||
+            typeof parsedBody.preview.text !== "string"
           ) {
             response.statusCode = 400;
             response.setHeader("Content-Type", "application/json");
-            response.end(JSON.stringify({ error: "Invalid source entry policy payload" }));
+            response.end(JSON.stringify({ error: "Invalid source.json save payload" }));
             return;
           }
 
-          const result = backend.updateSourceEntryPolicy({
-            entryId: parsedBody.entryId,
-            selectionStateKey: parsedBody.selectionStateKey,
-            displayName: parsedBody.displayName,
-            subfolder: parsedBody.subfolder,
-            renamePolicy: parsedBody.renamePolicy
-              ? {
-                  mode: parsedBody.renamePolicy.mode,
-                  phrases: parsedBody.renamePolicy.phrases,
-                }
-              : undefined,
-            ignoreGlobs: Array.isArray(parsedBody.ignoreGlobs)
-              ? parsedBody.ignoreGlobs
-              : undefined,
-            confirmReplaceCustomRename:
-              typeof parsedBody.confirmReplaceCustomRename === "undefined"
-                ? false
-                : parsedBody.confirmReplaceCustomRename,
-          });
-          response.statusCode = result.status === "ok" ? 200 : 409;
+          backend.saveDocumentPreview(parsedBody.preview);
+          response.statusCode = 200;
+          response.setHeader("Content-Type", "application/json");
+          response.end(JSON.stringify({ saved: true }));
+        } catch (error) {
+          response.statusCode = 400;
+          response.setHeader("Content-Type", "application/json");
+          response.end(
+            JSON.stringify({
+              error:
+                error instanceof Error
+                  ? error.message
+                  : "source.json could not be saved",
+            }),
+          );
+        }
+      });
+      server.middlewares.use("/__simulator/clear-data", async (request, response) => {
+        if (request.method !== "POST") {
+          response.statusCode = 405;
+          response.end("Method not allowed");
+          return;
+        }
+
+        try {
+          const rawBody = await readRequestBody(request);
+          const parsedBody = JSON.parse(rawBody) as {
+            selection?: {
+              fileCache?: boolean;
+              savedSelections?: boolean;
+              savedPreviewData?: boolean;
+              updateLogs?: boolean;
+            };
+          };
+          const selection = parsedBody.selection;
+          if (
+            !selection ||
+            typeof selection.fileCache !== "boolean" ||
+            typeof selection.savedSelections !== "boolean" ||
+            typeof selection.savedPreviewData !== "boolean" ||
+            typeof selection.updateLogs !== "boolean"
+          ) {
+            response.statusCode = 400;
+            response.setHeader("Content-Type", "application/json");
+            response.end(JSON.stringify({ error: "Invalid clear data payload" }));
+            return;
+          }
+
+          const result = backend.clearLocalData(selection);
+          response.statusCode = 200;
           response.setHeader("Content-Type", "application/json");
           response.end(JSON.stringify(result));
         } catch (error) {
@@ -305,7 +339,7 @@ function simulatorStatePlugin(): Plugin {
               error:
                 error instanceof Error
                   ? error.message
-                  : "Source entry policies could not be saved",
+                  : "Local database data could not be cleared",
             }),
           );
         }
@@ -365,4 +399,43 @@ function readRequestBody(
     });
     request.on("error", reject);
   });
+}
+
+function parseSourceFilesRequest(value: unknown): SourceFilesRequest | null {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  if (
+    typeof candidate.hydrationKey !== "string" ||
+    typeof candidate.selectionStateKey !== "string" ||
+    !isNormalizedScope(candidate.scope) ||
+    !Array.isArray(candidate.ignoreGlobs) ||
+    candidate.ignoreGlobs.some((glob) => typeof glob !== "string")
+  ) {
+    return null;
+  }
+
+  return {
+    hydrationKey: candidate.hydrationKey,
+    selectionStateKey: candidate.selectionStateKey,
+    legacyEntryId:
+      typeof candidate.legacyEntryId === "string" ? candidate.legacyEntryId : undefined,
+    scope: candidate.scope,
+    ignoreGlobs: candidate.ignoreGlobs,
+  };
+}
+
+function isNormalizedScope(value: unknown): value is NormalizedScope {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return (
+    typeof candidate.normalizedPath === "string" &&
+    typeof candidate.includeNestedFiles === "boolean" &&
+    typeof candidate.isArchiveSelection === "boolean"
+  );
 }

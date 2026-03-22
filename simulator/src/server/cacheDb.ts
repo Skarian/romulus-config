@@ -4,7 +4,14 @@ import path from "node:path";
 import Database from "better-sqlite3";
 
 import { normalizeArchiveSampleExtensions } from "../archiveSamplePolicy";
-import type { PreviewFixture, PreviewFixtureSample } from "../types";
+import type {
+  ClearLocalDataSelection,
+  HydrationLogEntry,
+  HydrationRunOutcome,
+  HydrationRunSummary,
+  PreviewFixture,
+  PreviewFixtureSample,
+} from "../types";
 
 type CachePayload = {
   kind: "standard";
@@ -82,11 +89,23 @@ type SourceCacheRowRecord = {
 };
 
 type HydrationRunRecord = {
+  id: number;
   started_at: string;
   finished_at: string | null;
   status: "running" | "completed" | "failed";
   source_count: number;
+  success_count: number;
+  failure_count: number;
   error_message: string | null;
+};
+
+type HydrationLogRecord = {
+  id: string;
+  run_id: number;
+  timestamp: string;
+  level: "info" | "success" | "error";
+  visibility: "basic" | "verbose";
+  message: string;
 };
 
 type PreviewFixtureRecord = {
@@ -182,6 +201,68 @@ export class SimulatorCacheDb {
       .run(cacheKey);
   }
 
+  getLatestHydrationRunId() {
+    const row = this.database
+      .prepare(`
+        SELECT id
+        FROM hydration_runs
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get() as { id: number } | undefined;
+    return row?.id ?? null;
+  }
+
+  listHydrationLogs(runId: number | null): HydrationLogEntry[] {
+    if (runId === null) {
+      return [];
+    }
+    const rows = this.database
+      .prepare(`
+        SELECT id, run_id, timestamp, level, visibility, message
+        FROM hydration_logs
+        WHERE run_id = ?
+        ORDER BY timestamp ASC, id ASC
+      `)
+      .all(runId) as HydrationLogRecord[];
+    return rows.map((row) => ({
+      id: row.id,
+      timestamp: row.timestamp,
+      level: row.level,
+      visibility: row.visibility,
+      message: row.message,
+    }));
+  }
+
+  appendHydrationLog(runId: number, entry: HydrationLogEntry) {
+    this.database
+      .prepare(`
+        INSERT INTO hydration_logs (
+          id,
+          run_id,
+          timestamp,
+          level,
+          visibility,
+          message
+        ) VALUES (
+          @id,
+          @run_id,
+          @timestamp,
+          @level,
+          @visibility,
+          @message
+        )
+      `)
+      .run({
+        id: entry.id,
+        run_id: runId,
+        timestamp: entry.timestamp,
+        level: entry.level,
+        visibility: entry.visibility,
+        message: entry.message,
+      });
+  }
+
   listPreviewFixtures(hydrationKey: string): PreviewFixture[] {
     const rows = this.database
       .prepare(`
@@ -195,25 +276,31 @@ export class SimulatorCacheDb {
     return rows.map(mapPreviewFixture);
   }
 
-  getArchiveSampleExtensions(hydrationKey: string) {
-    const row = this.database
-      .prepare(`
-        SELECT *
-        FROM archive_sample_extension_policies
-        WHERE hydration_key = ?
-      `)
-      .get(hydrationKey) as ArchiveSampleExtensionsRecord | undefined;
+  getArchiveSampleExtensions(
+    stateKey: string,
+    legacyKeys: {
+      hydrationKey?: string;
+    } = {},
+  ) {
+    const scopedPolicy = this.readArchiveSampleExtensions(stateKey);
+    const persisted =
+      scopedPolicy ??
+      (legacyKeys.hydrationKey
+        ? this.readArchiveSampleExtensions(legacyKeys.hydrationKey)
+        : null);
 
-    if (!row) {
+    if (!persisted) {
       return [];
     }
 
-    return normalizeArchiveSampleExtensions(
-      JSON.parse(row.file_extensions_json) as string[],
-    );
+    if (scopedPolicy === null) {
+      this.setArchiveSampleExtensions(stateKey, persisted);
+    }
+
+    return persisted;
   }
 
-  setArchiveSampleExtensions(hydrationKey: string, fileExtensions: string[]) {
+  setArchiveSampleExtensions(stateKey: string, fileExtensions: string[]) {
     const normalizedFileExtensions = normalizeArchiveSampleExtensions(fileExtensions);
     const updatedAt = new Date().toISOString();
     this.database
@@ -232,7 +319,7 @@ export class SimulatorCacheDb {
           updated_at = excluded.updated_at
       `)
       .run({
-        hydration_key: hydrationKey,
+        hydration_key: stateKey,
         file_extensions_json: JSON.stringify(normalizedFileExtensions),
         updated_at: updatedAt,
       });
@@ -356,6 +443,19 @@ export class SimulatorCacheDb {
     return row?.finished_at ?? null;
   }
 
+  getLatestHydrationRunSummary(): HydrationRunSummary | null {
+    const row = this.database
+      .prepare(`
+        SELECT *
+        FROM hydration_runs
+        WHERE finished_at IS NOT NULL
+        ORDER BY id DESC
+        LIMIT 1
+      `)
+      .get() as HydrationRunRecord | undefined;
+    return row ? mapHydrationRunSummary(row) : null;
+  }
+
   startHydrationRun(sourceCount: number): number {
     const startedAt = new Date().toISOString();
     const result = this.database
@@ -365,8 +465,10 @@ export class SimulatorCacheDb {
           finished_at,
           status,
           source_count,
+          success_count,
+          failure_count,
           error_message
-        ) VALUES (?, NULL, 'running', ?, NULL)
+        ) VALUES (?, NULL, 'running', ?, 0, 0, NULL)
       `)
       .run(startedAt, sourceCount);
 
@@ -376,15 +478,45 @@ export class SimulatorCacheDb {
   finishHydrationRun(
     runId: number,
     status: "completed" | "failed",
+    counts: {
+      successCount: number;
+      failureCount: number;
+    },
     errorMessage: string | null,
   ) {
     this.database
       .prepare(`
         UPDATE hydration_runs
-        SET finished_at = ?, status = ?, error_message = ?
+        SET finished_at = ?, status = ?, success_count = ?, failure_count = ?, error_message = ?
         WHERE id = ?
       `)
-      .run(new Date().toISOString(), status, errorMessage, runId);
+      .run(
+        new Date().toISOString(),
+        status,
+        counts.successCount,
+        counts.failureCount,
+        errorMessage,
+        runId,
+      );
+  }
+
+  clearLocalData(selection: ClearLocalDataSelection) {
+    this.database.transaction(() => {
+      if (selection.fileCache) {
+        this.database.prepare("DELETE FROM source_cache").run();
+      }
+      if (selection.savedSelections) {
+        this.database.prepare("DELETE FROM selected_file_state").run();
+        this.database.prepare("DELETE FROM selected_file_state_by_entry").run();
+        this.database.prepare("DELETE FROM selected_file_state_by_scope").run();
+      }
+      if (selection.savedPreviewData) {
+        this.database.prepare("DELETE FROM archive_sample_extension_policies").run();
+      }
+      if (selection.updateLogs) {
+        this.database.prepare("DELETE FROM hydration_logs").run();
+      }
+    })();
   }
 
   private initialize() {
@@ -406,7 +538,18 @@ export class SimulatorCacheDb {
         finished_at TEXT,
         status TEXT NOT NULL,
         source_count INTEGER NOT NULL,
+        success_count INTEGER NOT NULL DEFAULT 0,
+        failure_count INTEGER NOT NULL DEFAULT 0,
         error_message TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS hydration_logs (
+        id TEXT PRIMARY KEY,
+        run_id INTEGER NOT NULL,
+        timestamp TEXT NOT NULL,
+        level TEXT NOT NULL,
+        visibility TEXT NOT NULL,
+        message TEXT NOT NULL
       );
 
       CREATE TABLE IF NOT EXISTS preview_fixtures (
@@ -443,6 +586,8 @@ export class SimulatorCacheDb {
         updated_at TEXT NOT NULL
       );
     `);
+    ensureColumn(this.database, "hydration_runs", "success_count", "INTEGER NOT NULL DEFAULT 0");
+    ensureColumn(this.database, "hydration_runs", "failure_count", "INTEGER NOT NULL DEFAULT 0");
   }
 
   private readScopedSelectedRowIds(stateKey: string) {
@@ -486,6 +631,24 @@ export class SimulatorCacheDb {
 
     return row ? (JSON.parse(row.selected_row_ids_json) as string[]) : null;
   }
+
+  private readArchiveSampleExtensions(stateKey: string) {
+    const row = this.database
+      .prepare(`
+        SELECT *
+        FROM archive_sample_extension_policies
+        WHERE hydration_key = ?
+      `)
+      .get(stateKey) as ArchiveSampleExtensionsRecord | undefined;
+
+    if (!row) {
+      return null;
+    }
+
+    return normalizeArchiveSampleExtensions(
+      JSON.parse(row.file_extensions_json) as string[],
+    );
+  }
 }
 
 function mapSourceCacheRow(record: SourceCacheRowRecord): SourceCacheRow {
@@ -518,6 +681,41 @@ function mapPreviewFixture(record: PreviewFixtureRecord): PreviewFixture {
     samples,
     updatedAt: record.updated_at,
   };
+}
+
+function mapHydrationRunSummary(record: HydrationRunRecord): HydrationRunSummary {
+  const outcome: HydrationRunOutcome =
+    record.failure_count === 0
+      ? "success"
+      : record.success_count > 0
+        ? "mixed"
+        : "failed";
+
+  return {
+    runId: record.id,
+    startedAt: record.started_at,
+    finishedAt: record.finished_at ?? record.started_at,
+    sourceCount: record.source_count,
+    successCount: record.success_count,
+    failureCount: record.failure_count,
+    outcome,
+    errorMessage: record.error_message,
+  };
+}
+
+function ensureColumn(
+  database: Database.Database,
+  tableName: string,
+  columnName: string,
+  columnDefinition: string,
+) {
+  const columns = database
+    .prepare(`PRAGMA table_info(${tableName})`)
+    .all() as Array<{ name: string }>;
+  if (columns.some((column) => column.name === columnName)) {
+    return;
+  }
+  database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnDefinition}`);
 }
 
 export function createReadyStandardCacheRow(
