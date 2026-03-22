@@ -31,6 +31,7 @@ import {
   buildHydrationStateByHydrationKey,
   getHydrationStateForEntry,
 } from "./hydrationStateLookup";
+import { getPendingHydrationEntryIds } from "./hydrationRefreshSelection";
 import { buildPreviewEntries } from "./runtimeValidation";
 import { useSourceEditorController } from "./sourceEditorController";
 import { useSourceListController } from "./sourceListController";
@@ -178,8 +179,18 @@ function App() {
     () => sourceListController.rows.map((row) => row.ref),
     [sourceListController.rows],
   );
+  const pendingHydrationEntryIds = useMemo(
+    () =>
+      getPendingHydrationEntryIds(
+        sourceListController.rows.map((row) => ({
+          entryId: row.entry.id,
+          status: row.hydrationState?.status,
+        })),
+      ),
+    [sourceListController.rows],
+  );
   const hasHydrationLogs = state.hydration.running || state.hydration.logs.length > 0;
-  const canStartMissingCacheRefresh = sourceListController.rows.some((row) => row.missingCache);
+  const canStartMissingCacheRefresh = pendingHydrationEntryIds.length > 0;
   const canStartHydration =
     state.entries.length > 0 &&
     state.hydration.apiKeyConfigured &&
@@ -451,6 +462,7 @@ function App() {
   function buildHydrationRequestPayload(
     mode: HydrationMode,
     snapshot: EditorState,
+    entryIdsForPendingRefresh: string[],
   ) {
     return mode === "all"
       ? {
@@ -458,7 +470,7 @@ function App() {
           forceRefresh: true,
         }
       : {
-          entryIds: snapshot.hydration.missingSourceIds,
+          entryIds: entryIdsForPendingRefresh,
           forceRefresh: false,
         };
   }
@@ -497,7 +509,11 @@ function App() {
     mode: HydrationMode,
     snapshot: EditorState = state,
   ) {
-    const { entryIds, forceRefresh } = buildHydrationRequestPayload(mode, snapshot);
+    const { entryIds, forceRefresh } = buildHydrationRequestPayload(
+      mode,
+      snapshot,
+      pendingHydrationEntryIds,
+    );
     return requestHydrationJob(entryIds, forceRefresh);
   }
 
@@ -1372,7 +1388,7 @@ function App() {
                   {" "}
                   Only Load Missing Cache
                 </span>
-                <small>Loads file cache only for sources that do not already have local cache.</small>
+                <small>Loads file cache for sources that still need local cache work.</small>
               </label>
               <label className="field">
                 <span>
@@ -1409,7 +1425,7 @@ function App() {
               disabled={!canStartHydration}
               title={
                 hydrationMode === "missing" && !canStartMissingCacheRefresh
-                  ? "No Missing Cache"
+                  ? "No Cache Work Needed"
                   : undefined
               }
               onClick={() => {

@@ -96,15 +96,15 @@ This draft records source-list behavior for the convenience editor's entry page 
 59. The `Update Database` modal includes two radio options for refresh scope:
    - `Only Load Missing Cache`
    - `Refresh All Cache`
-60. `Only Load Missing Cache` uses helper copy `Loads file cache only for sources that do not already have local cache.`
+60. `Only Load Missing Cache` uses helper copy `Loads file cache for sources that still need local cache work.`
 61. `Refresh All Cache` uses helper copy `Rebuilds file cache for every source, even when local cache already exists.`
 62. `Only Load Missing Cache` is selected by default when the `Update Database` modal opens.
-63. If `Only Load Missing Cache` is selected when no sources are currently missing cache, `Start Update` stays disabled and hover text says `No Missing Cache`.
+63. If `Only Load Missing Cache` is selected when no sources currently need local cache work, `Start Update` stays disabled and hover text says `No Cache Work Needed`.
 64. If refresh credentials are missing, `Start Update` stays disabled and the modal shows inline setup instructions naming `REAL_DEBRID_API_KEY` in `editor/.env.local`.
 65. `Refresh All Cache` overwrites cache for every source regardless of whether that source currently has no-cache warnings, stale saved selections, or stale saved preview data.
 66. `Refresh All Cache` does not proactively clear saved selections or saved preview data before the run.
 67. After `Refresh All Cache`, the app reuses compatible saved selections and saved preview data where possible and falls back to the existing reconciliation rules when refreshed inventory makes some saved state invalid.
-68. The `Update Database` modal does not enumerate which specific sources are currently missing cache.
+68. The `Update Database` modal does not enumerate which specific sources currently need local cache work.
 69. When the maintainer starts `Refresh Database`, the `Update Database` modal automatically transitions into `View Logs`.
 70. After that transition, the maintainer may close `View Logs` while the refresh continues in the background.
 71. While `Refresh Database` is running, the source-list shell remains visible but normal source-list interactions stay locked.
