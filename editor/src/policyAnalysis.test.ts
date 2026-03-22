@@ -64,7 +64,7 @@ test("detectManagedRenamePolicy parses a generated phrase-specific rename rule",
   assert.ok(generatedRule);
   assert.deepEqual(generatedRule, {
     pattern:
-      "(?:[\\s.]*(?:\\(Rev 1\\)|\\(USA\\))(?:\\s*(?:\\(Rev 1\\)|\\(USA\\)))*(?:([\\s]+)(?=(?:\\(World\\))(?:\\s*\\([^)]*\\))*\\.[^.]+$)|(?:[\\s.]*(?=\\.[^.]+$))))",
+      "(?:[\\s.]*(?:\\(Rev 1\\)|\\(USA\\))(?:\\s*(?:\\(Rev 1\\)|\\(USA\\)))*(?:([\\s]+)(?=(?:\\(World\\))(?:\\s*(?:\\([^)]*\\)|\\[[^\\]]*\\]))*\\.[^.]+$)|(?:[\\s.]*(?=\\.[^.]+$))))",
     replacement: "$1",
   });
 
@@ -150,6 +150,62 @@ test("detectManagedRenamePolicy treats near-canonical custom regexes as custom",
     phrases: [],
     isCustom: true,
   });
+});
+
+test("selected phrases supports trailing bracket groups without changing all phrases", () => {
+  const analysis = analyzeParentheticalSuffixes([
+    "Game Title [b].zip",
+    "Another Game (USA) [T+Spa].zip",
+    "Third Game [b] [v1.1].zip",
+  ]);
+  const availablePhrases = analysis.parentheticalPhrases.map((phrase) => phrase.phrase);
+  const generatedRule = buildManagedRenameRule("phrases", ["[b]"], availablePhrases);
+
+  assert.deepEqual(analysis.parentheticalPhrases, [
+    { phrase: "[b]", count: 2 },
+    { phrase: "(USA)", count: 1 },
+    { phrase: "[T+Spa]", count: 1 },
+    { phrase: "[v1.1]", count: 1 },
+  ]);
+  assert.ok(generatedRule);
+  assert.equal(
+    applyManagedRenameRule(
+      {
+        mode: "phrases",
+        phrases: ["[b]"],
+      },
+      "Game Title [b].zip",
+      availablePhrases,
+    ),
+    "Game Title.zip",
+  );
+  assert.equal(
+    applyManagedRenameRule(
+      {
+        mode: "phrases",
+        phrases: ["[b]"],
+      },
+      "Another Game (USA) [T+Spa].zip",
+      availablePhrases,
+    ),
+    "Another Game (USA) [T+Spa].zip",
+  );
+  assert.deepEqual(detectManagedRenamePolicy(generatedRule, availablePhrases), {
+    mode: "phrases",
+    phrases: ["[b]"],
+    isCustom: false,
+  });
+  assert.equal(
+    applyManagedRenameRule(
+      {
+        mode: "all",
+        phrases: availablePhrases,
+      },
+      "Game Title [b].zip",
+      availablePhrases,
+    ),
+    "Game Title [b].zip",
+  );
 });
 
 test("analyzeParentheticalSuffixes only counts trailing managed phrases", () => {

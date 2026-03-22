@@ -232,7 +232,7 @@ What this changes:
 
 If you also use `dedicatedFolder` unarchive, you can give the top-level extract folder its own rename rule separately. That is covered in [config-reference.md](./config-reference.md)
 
-If the source is already hydrated in the editor cache, use the editor’s `Rename Policy` and `Statistics` sections for that source before you choose a regex. They now show the observed parenthetical phrases and the useful counts directly in the browser, and `Rename Policy` can write the managed rule back to `source.json` for you
+If the source is already hydrated in the editor cache, use the editor’s `Rename Policy` and `Statistics` sections for that source before you choose a regex. They now show the observed removable trailing phrases and the useful counts directly in the browser, and `Rename Policy` can write the managed rule back to `source.json` for you
 
 ## A Good Workflow
 

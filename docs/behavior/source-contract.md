@@ -42,7 +42,7 @@ This draft records the editor-facing `source.json` contract for the convenience 
     - `Custom`
 20. `No rename` means the managed editor path applies no top-level `entry.rename` rule.
 21. `All phrases` analyzes observed parenthetical groups across the full file name and generates one canonical managed regex or replacement pair that strips parenthetical groups throughout the file name, not just trailing suffix groups.
-22. `Selected phrases` analyzes observed parenthetical groups across the full file name, shows the observed phrase list in descending order by frequency, and generates one canonical managed regex or replacement pair that strips only the selected phrases throughout the file name.
+22. `Selected phrases` analyzes supported trailing metadata groups, including parenthetical and bracketed groups, shows the observed phrase list in descending order by frequency, and generates one canonical managed regex or replacement pair that strips only the selected phrases.
 23. `Custom` accepts any schema-valid `pattern` plus `replacement` pair.
 24. If `source.json` contains an invalid custom regex on initial load, that source still opens in the convenience editor instead of blocking the entire document.
 25. An initially loaded invalid custom regex opens in `Custom` mode with warning treatment and remains unsavable until fixed.
@@ -57,7 +57,7 @@ This draft records the editor-facing `source.json` contract for the convenience 
     - `All phrases`
     - `Selected phrases`
     - `Custom`
-30. Dedicated-folder rename uses the same full-name parenthetical-group stripping semantics, descending-frequency selected phrase ordering, and `Custom` schema-valid pattern plus replacement allowance as top-level file rename.
+30. Dedicated-folder rename uses the same selected-phrase semantics for supported trailing parenthetical and bracketed groups, the same descending-frequency selected phrase ordering, and the same `Custom` schema-valid pattern plus replacement allowance as top-level file rename.
 31. Exact `.zip` scope paths and their archive-selection behavior remain in scope for the editor conversion.
 32. Detailed file-row behavior for exact `.zip` scope archive-selection sources lives in [`files-and-selection.md`](files-and-selection.md).
 33. Managed rename detection recognizes only the canonical `All phrases` rule and canonical `Selected phrases` rules; any other valid rename rule is treated as `Custom`.

@@ -46,6 +46,9 @@ const SELECTIVE_LOOKAHEAD_PREFIX = "(?=";
 const SELECTIVE_END = "|(?:[\\s.]*(?=\\.[^.]+$))))";
 const SELECTIVE_REPLACEMENT = "$1";
 const SELECTIVE_IMPOSSIBLE_LOOKAHEAD = "\\b\\B";
+const MANAGED_GROUP_PATTERN = "(?:\\([^)]*\\)|\\[[^\\]]*\\])";
+const MANAGED_GROUP_SUFFIX_PATTERN = `(?:\\s*${MANAGED_GROUP_PATTERN})*`;
+const SUPPORTED_SELECTED_PHRASE_PATTERN = /^(?:\([^)]*\)|\[[^\]]*\])$/;
 
 export function analyzeParentheticalSuffixes(
   fileNames: string[],
@@ -58,23 +61,26 @@ export function analyzeParentheticalSuffixes(
 
   for (const fileName of fileNames) {
     const stem = stripExtension(fileName);
-    const trailingMatches = trailingParentheticalMatches(stem);
+    const trailingMatches = trailingManagedGroupMatches(stem);
     if (trailingMatches.length > 0) {
-      withParenthesesCount += 1;
       for (const phrase of trailingMatches) {
         phraseCounts.set(phrase, (phraseCounts.get(phrase) ?? 0) + 1);
       }
     }
-    if (trailingMatches.length > 1) {
+    const trailingParentheses = trailingParentheticalMatches(stem);
+    if (trailingParentheses.length > 0) {
+      withParenthesesCount += 1;
+    }
+    if (trailingParentheses.length > 1) {
       multiParenthesesCount += 1;
     }
 
-    const firstMatch = stem.match(/\([^)]*\)/);
+    const firstMatch = stem.match(new RegExp(MANAGED_GROUP_PATTERN));
     if (firstMatch) {
       const firstMatchIndex = firstMatch.index ?? 0;
       const prefixBeforeFirstParenthetical = stem.slice(0, firstMatchIndex).trimEnd();
       const after = stem.slice(firstMatchIndex + firstMatch[0].length);
-      const remainder = after.replace(/\s*\([^)]*\)\s*/g, "");
+      const remainder = after.replace(new RegExp(`\\s*${MANAGED_GROUP_PATTERN}\\s*`, "g"), "");
       if (remainder.trim().length > 0) {
         trueMiddleTextCount += 1;
       }
@@ -92,12 +98,12 @@ export function analyzeParentheticalSuffixes(
   if (fileNames.length === 0) {
     warnings.push("No files are available to analyze yet.");
   }
-  if (withParenthesesCount === 0 && fileNames.length > 0) {
-    warnings.push("No parenthetical phrases were observed in this source.");
+  if (parentheticalPhrases.length === 0 && fileNames.length > 0) {
+    warnings.push("No removable trailing metadata phrases were observed in this source.");
   }
   if (trueMiddleTextCount > 0) {
     warnings.push(
-      `${trueMiddleTextCount} file name(s) contain real text after the first parenthetical group. Exact phrase stripping is safer than All phrases here.`,
+      `${trueMiddleTextCount} file name(s) contain real text after the first removable metadata group. Exact phrase stripping is safer than All phrases here.`,
     );
   }
   if (trailingDotTitleCount > 0) {
@@ -147,7 +153,7 @@ export function buildManagedRenameRule(
     .join("|");
   const lookaheadBody =
     escapedUnselectedPhrases.length > 0
-      ? `(?:${escapedUnselectedPhrases})(?:\\s*\\([^)]*\\))*\\.[^.]+$`
+      ? `(?:${escapedUnselectedPhrases})${MANAGED_GROUP_SUFFIX_PATTERN}\\.[^.]+$`
       : SELECTIVE_IMPOSSIBLE_LOOKAHEAD;
 
   return {
@@ -243,7 +249,7 @@ function parseSelectiveRenamePhrases(renameRule: RenameRule) {
 
   for (const token of splitOnUnescapedPipe(selectedPattern)) {
     const phrase = unescapeRegex(token);
-    if (!/^\([^)]*\)$/.test(phrase)) {
+    if (!SUPPORTED_SELECTED_PHRASE_PATTERN.test(phrase)) {
       return null;
     }
     parsedPhrases.push(phrase);
@@ -311,6 +317,11 @@ function trailingParentheticalMatches(stem: string) {
   return trailingSuffix.match(/\([^)]*\)/g) ?? [];
 }
 
+function trailingManagedGroupMatches(stem: string) {
+  const trailingSuffix = stem.match(new RegExp(`(?:\\s*${MANAGED_GROUP_PATTERN}\\s*)+$`))?.[0] ?? "";
+  return trailingSuffix.match(new RegExp(MANAGED_GROUP_PATTERN, "g")) ?? [];
+}
+
 function escapeRegex(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -324,7 +335,7 @@ function parseSelectiveLookaheadPhrases(value: string) {
     return [];
   }
 
-  const suffix = "(?:\\s*\\([^)]*\\))*\\.[^.]+$";
+  const suffix = `${MANAGED_GROUP_SUFFIX_PATTERN}\\.[^.]+$`;
   if (!value.startsWith("(?:") || !value.endsWith(suffix)) {
     return null;
   }
@@ -341,7 +352,7 @@ function parseSelectiveLookaheadPhrases(value: string) {
   const phrases: string[] = [];
   for (const token of splitOnUnescapedPipe(inner)) {
     const phrase = unescapeRegex(token);
-    if (!/^\([^)]*\)$/.test(phrase)) {
+    if (!SUPPORTED_SELECTED_PHRASE_PATTERN.test(phrase)) {
       return null;
     }
     phrases.push(phrase);

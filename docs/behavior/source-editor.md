@@ -61,10 +61,10 @@ This draft records editor-session behavior. Shared persistence and conflict rule
 38. The top-level `Rename` section uses original file names before top-level rename is applied.
 39. When unarchive uses `dedicatedFolder`, the dedicated-folder rename section analyzes the current draft-visible dedicated-folder candidates produced by the current unarchive draft, before file checkbox selection is applied.
 40. The dedicated-folder rename section uses pre-rename folder names before dedicated-folder rename is applied.
-41. When `Selected phrases` is active, the observed phrase list is shown in descending order by frequency.
+41. When `Selected phrases` is active, the observed phrase list is shown in descending order by frequency and includes trailing parenthetical groups plus trailing bracketed groups.
 42. Each observed phrase in that list shows its frequency count alongside the phrase text.
 43. If two observed phrases have the same frequency, their tie-break order is alphabetical.
-44. If `Selected phrases` is active and no parenthetical phrases are detected, the observed phrase list stays visible and simply shows none.
+44. If `Selected phrases` is active and no supported trailing parenthetical or bracketed phrases are detected, the observed phrase list stays visible and simply shows none.
 45. If `All phrases` is selected and no parenthetical phrases are detected, that mode remains selected as a no-op.
 46. Checking or unchecking phrases in `Selected phrases` updates the current live draft rename behavior immediately.
 47. When the user switches into `Selected phrases`, all detected phrases start unchecked by default.
@@ -129,7 +129,7 @@ This draft records editor-session behavior. Shared persistence and conflict rule
 14. Individual source editors must not preserve or restore the previous source-list scroll position on return.
 15. Managed rename modes must not expose raw `pattern` and `replacement` inputs in the source editor.
 16. Switching away from `Custom` during a live draft session must not discard the current custom `pattern` and `replacement` values unless the whole draft session is discarded.
-17. `Selected phrases` must not hide its phrase list entirely just because no parenthetical phrases were detected for the current draft.
+17. `Selected phrases` must not hide its phrase list entirely just because no supported trailing parenthetical or bracketed phrases were detected for the current draft.
 18. Leaving and returning to `Selected phrases` during the same live draft session must not clear the currently checked phrases.
 19. `Selected phrases` must not preserve checked phrases that are no longer present in the current detected phrase list.
 20. Newly appeared detected phrases must not start prechecked when the current detected phrase list changes during a live draft session.
