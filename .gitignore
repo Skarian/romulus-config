@@ -5,3 +5,4 @@ editor/node_modules
 editor/dist
 editor/.local
 editor/.env.local
+notes.md
